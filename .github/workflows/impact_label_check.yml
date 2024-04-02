@@ -1,0 +1,54 @@
+# copied from @petetronic https://github.com/posit-dev/positron-test-label/blob/main/.github/workflows/impact_label_check.yml
+name: One Impact Label Only
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    if: contains(github.event.label.name, 'impact')
+    permissions:
+      issues: write
+    steps:
+      - name: Replace Impact Label
+        uses: actions/github-script@v7
+        env:
+          LABEL_NAME: ${{ github.event.label.name }}
+        with:
+          script: |
+            const { data } = await github.rest.issues.listLabelsOnIssue({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            })
+
+            // Return early if there are no labels
+            if (data.length == 0){
+              console.log(`No labels present; no action taken.`)
+              return
+            }
+
+            // Find impact:* labels
+            const filteredLabels = data.filter(label => label.name.startsWith('impact'))
+
+            // Return early if there aren't any duplicates 
+            if (filteredLabels.length < 2){
+              console.log(`Duplicate impact labels not present; no action taken.`)
+              return
+            }
+
+            for (const label of filteredLabels) {
+              // Retain new impact: label
+              if (label.name == process.env.LABEL_NAME) {
+                continue
+              }
+
+              // Remove any other impact:* labels
+              github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: [label.name]
+              })
+            }
