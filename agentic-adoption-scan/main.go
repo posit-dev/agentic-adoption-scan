@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,7 @@ const usage = `Usage: agentic-adoption-scan <command> [flags]
 Commands:
   scan         Detect agentic coding indicators across an org's repos
   inspect      Fetch and analyze content of detected indicators
+  compact      Deduplicate and compact the Parquet scan cache
   init-config  Generate a starter config file with all built-in indicators
   serve        Run as an MCP server (stdio or Streamable HTTP transport)
 
@@ -30,6 +32,8 @@ func main() {
 		runScan(os.Args[2:])
 	case "inspect":
 		runInspect(os.Args[2:])
+	case "compact":
+		runCompact(os.Args[2:])
 	case "init-config":
 		runInitConfig(os.Args[2:])
 	case "serve":
@@ -112,21 +116,27 @@ func runScan(args []string) {
 		os.Exit(1)
 	}
 
-	var w *os.File
-	if *output != "" {
-		w, err = os.Create(*output)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+	if *output != "" && strings.HasSuffix(*output, ".parquet") {
+		if err := WriteScanParquet(*output, results); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing Parquet: %v\n", err)
 			os.Exit(1)
 		}
-		defer w.Close()
 	} else {
-		w = os.Stdout
-	}
-
-	if err := WriteScanCSV(w, results); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing CSV: %v\n", err)
-		os.Exit(1)
+		var w *os.File
+		if *output != "" {
+			w, err = os.Create(*output)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+				os.Exit(1)
+			}
+			defer w.Close()
+		} else {
+			w = os.Stdout
+		}
+		if err := WriteScanCSV(w, results); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing CSV: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := cache.Save(); err != nil {
@@ -170,21 +180,27 @@ func runInspect(args []string) {
 		os.Exit(1)
 	}
 
-	var w *os.File
-	if *output != "" {
-		w, err = os.Create(*output)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+	if *output != "" && strings.HasSuffix(*output, ".parquet") {
+		if err := WriteInspectParquet(*output, results); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing Parquet: %v\n", err)
 			os.Exit(1)
 		}
-		defer w.Close()
 	} else {
-		w = os.Stdout
-	}
-
-	if err := WriteInspectCSV(w, results); err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing CSV: %v\n", err)
-		os.Exit(1)
+		var w *os.File
+		if *output != "" {
+			w, err = os.Create(*output)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating output file: %v\n", err)
+				os.Exit(1)
+			}
+			defer w.Close()
+		} else {
+			w = os.Stdout
+		}
+		if err := WriteInspectCSV(w, results); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing CSV: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Inspection complete: %d files inspected\n", len(results))

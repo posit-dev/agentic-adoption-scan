@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 // CachedIndicator stores a single indicator result in the cache.
@@ -24,7 +27,7 @@ type CachedRepo struct {
 	Indicators []CachedIndicator `json:"indicators"`
 }
 
-// CacheData is the top-level structure of the cache file.
+// CacheData is the top-level in-memory cache structure.
 // Key format: "org/repo"
 type CacheData map[string]*CachedRepo
 
@@ -41,50 +44,71 @@ func NewCache(dir string) *Cache {
 	}
 }
 
+// LoadCache loads the cache from dir.
+//
+// It first looks for a Parquet cache file (scan-cache.parquet).  If that is
+// absent it falls back to the legacy JSON file (scan-cache.json) so existing
+// caches are automatically migrated on the next Save call.
 func LoadCache(dir string) (*Cache, error) {
 	c := NewCache(dir)
-	path := c.filePath()
 
-	data, err := os.ReadFile(path)
+	store, basePath, err := ParseStorePath(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return c, nil
-		}
-		return nil, fmt.Errorf("reading cache file: %w", err)
+		return nil, fmt.Errorf("parsing cache path %q: %w", dir, err)
 	}
 
-	if err := json.Unmarshal(data, &c.data); err != nil {
-		return nil, fmt.Errorf("parsing cache file: %w", err)
+	parquetPath := path.Join(basePath, "scan-cache.parquet")
+	rows, err := ReadScanRows(store, parquetPath)
+	if err == nil {
+		c.data = cacheDataFromRows(rows)
+		return c, nil
+	}
+
+	// Treat "not found" as an empty cache; propagate other errors.
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("loading parquet cache: %w", err)
+	}
+
+	// Fall back to legacy JSON for local caches only.
+	if _, ok := store.(*LocalStore); ok {
+		jsonPath := filepath.Join(dir, "scan-cache.json")
+		if jsonData, jerr := os.ReadFile(jsonPath); jerr == nil {
+			var legacyData CacheData
+			if jerr := json.Unmarshal(jsonData, &legacyData); jerr == nil {
+				c.data = legacyData
+				return c, nil
+			}
+		}
 	}
 
 	return c, nil
 }
 
-func (c *Cache) filePath() string {
-	return filepath.Join(c.dir, "scan-cache.json")
-}
-
+// Save persists the cache to a flat Parquet file at <dir>/scan-cache.parquet.
+// The legacy JSON file (if any) is left untouched; users may delete it once
+// they confirm the Parquet cache is working.
 func (c *Cache) Save() error {
-	if err := os.MkdirAll(c.dir, 0755); err != nil {
-		return fmt.Errorf("creating cache dir: %w", err)
-	}
-
-	data, err := json.MarshalIndent(c.data, "", "  ")
+	store, basePath, err := ParseStorePath(c.dir)
 	if err != nil {
-		return fmt.Errorf("marshaling cache: %w", err)
+		return fmt.Errorf("parsing cache path: %w", err)
 	}
 
-	return os.WriteFile(c.filePath(), data, 0644)
-}
+	// If using LocalStore ensure the directory exists.
+	if _, ok := store.(*LocalStore); ok {
+		if err := os.MkdirAll(c.dir, 0755); err != nil {
+			return fmt.Errorf("creating cache dir: %w", err)
+		}
+	}
 
-func (c *Cache) repoKey(org, repo string) string {
-	return org + "/" + repo
+	rows := cacheDataToRows(c.data)
+	parquetPath := path.Join(basePath, "scan-cache.parquet")
+	return writeScanRows(store, parquetPath, rows)
 }
 
 // IsRepoFresh returns true if the repo's pushed_at matches the cached value,
 // meaning it hasn't changed since we last scanned it.
 func (c *Cache) IsRepoFresh(org, repo, pushedAt string) bool {
-	key := c.repoKey(org, repo)
+	key := org + "/" + repo
 	cached, ok := c.data[key]
 	if !ok {
 		return false
@@ -94,7 +118,7 @@ func (c *Cache) IsRepoFresh(org, repo, pushedAt string) bool {
 
 // GetRepoResults returns cached indicator results for a repo.
 func (c *Cache) GetRepoResults(org, repo string) []CachedIndicator {
-	key := c.repoKey(org, repo)
+	key := org + "/" + repo
 	cached, ok := c.data[key]
 	if !ok {
 		return nil
@@ -104,9 +128,78 @@ func (c *Cache) GetRepoResults(org, repo string) []CachedIndicator {
 
 // SetRepoResults updates the cache for a repo.
 func (c *Cache) SetRepoResults(org, repo, pushedAt string, indicators []CachedIndicator) {
-	key := c.repoKey(org, repo)
+	key := org + "/" + repo
 	c.data[key] = &CachedRepo{
 		PushedAt:   pushedAt,
 		Indicators: indicators,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Conversion between CacheData and []ScanRow
+// ---------------------------------------------------------------------------
+
+// cacheDataFromRows builds the in-memory cache from a flat list of ScanRows.
+// For each (org, repo) only the rows from the most recent scan_timestamp are
+// kept, which matches the existing invalidation semantics.
+func cacheDataFromRows(rows []ScanRow) CacheData {
+	// Find the latest scan timestamp per repo.
+	latest := make(map[string]string) // org/repo -> max scan_timestamp
+	for _, r := range rows {
+		key := r.Org + "/" + r.Repo
+		if r.ScanTimestamp > latest[key] {
+			latest[key] = r.ScanTimestamp
+		}
+	}
+
+	data := make(CacheData)
+	for _, r := range rows {
+		key := r.Org + "/" + r.Repo
+		if r.ScanTimestamp != latest[key] {
+			continue
+		}
+		cached, ok := data[key]
+		if !ok {
+			cached = &CachedRepo{
+				PushedAt:  r.RepoPushedAt,
+				ScannedAt: r.ScanTimestamp,
+			}
+			data[key] = cached
+		}
+		cached.Indicators = append(cached.Indicators, CachedIndicator{
+			Category:  r.Category,
+			Indicator: r.Indicator,
+			Found:     r.Found,
+			FilePath:  r.FilePath,
+			Details:   r.Details,
+			ScannedAt: r.ScanTimestamp,
+		})
+	}
+	return data
+}
+
+// cacheDataToRows converts the in-memory cache to a flat list of ScanRows.
+func cacheDataToRows(data CacheData) []ScanRow {
+	var rows []ScanRow
+	for key, cached := range data {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		org, repo := parts[0], parts[1]
+		for _, ind := range cached.Indicators {
+			rows = append(rows, ScanRow{
+				ScanTimestamp: ind.ScannedAt,
+				Org:           org,
+				Repo:          repo,
+				RepoPushedAt:  cached.PushedAt,
+				Category:      ind.Category,
+				Indicator:     ind.Indicator,
+				Found:         ind.Found,
+				FilePath:      ind.FilePath,
+				Details:       ind.Details,
+			})
+		}
+	}
+	return rows
 }
