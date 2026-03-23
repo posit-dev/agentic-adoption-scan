@@ -118,6 +118,77 @@ The tool can run as an MCP server, exposing tools for use directly within Claude
 
 Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_summary`, `get_adoption_summary`.
 
+### Deploying to Posit Connect
+
+You can deploy the MCP server to [Posit Connect](https://docs.posit.co/connect/user/mcp-servers/) so that AI clients across your organization can access it without running anything locally. The `connect/` directory contains a Python entry point that wraps the binary for Connect's ASGI runtime.
+
+#### Prerequisites
+
+- [rsconnect-python](https://docs.posit.co/rsconnect-python/) installed: `pip install rsconnect-python`
+- The `gh` CLI installed and available in `PATH` on the Connect server (the binary uses it for GitHub API calls)
+- A Posit Connect server URL and API key
+
+#### 1. Set environment variables
+
+In your Connect content's **Vars** settings (or pass via `--environment` at deploy time), set:
+
+```
+GITHUB_TOKEN=<your-github-pat>
+```
+
+The `gh` CLI reads `GITHUB_TOKEN` automatically, so no interactive `gh auth login` is needed on the server.
+
+#### 2. Write the manifest
+
+```bash
+cd connect/
+rsconnect write-manifest fastapi --overwrite --entrypoint server:mcp .
+```
+
+This creates `connect/manifest.json` (and `connect/requirements.txt` if not already present) for later or CI-driven deployments.
+
+#### 3. Deploy
+
+```bash
+rsconnect deploy fastapi \
+  --server https://your-connect-server.example.com \
+  --api-key YOUR_API_KEY \
+  --entrypoint server:mcp \
+  --title "agentic-adoption-scan" \
+  .
+```
+
+Or if you have already saved your server with `rsconnect add`:
+
+```bash
+rsconnect deploy fastapi \
+  --name your-server-nickname \
+  --entrypoint server:mcp \
+  --title "agentic-adoption-scan" \
+  .
+```
+
+#### 4. Use from Claude Code
+
+Once deployed, add the Connect-hosted MCP server to your Claude Code configuration:
+
+```json
+{
+  "mcpServers": {
+    "agentic-adoption-scan": {
+      "type": "streamable-http",
+      "url": "https://your-connect-server.example.com/content/<content-id>/mcp"
+    }
+  }
+}
+```
+
+Replace `<content-id>` with the numeric ID shown in the Connect dashboard for this content item.
+
+#### Performance tip
+
+Set **Min processes** to `1` in the content's runtime settings so the server is always warm and avoids cold-start delays when clients connect.
+
 ---
 
 ## Other scripts
