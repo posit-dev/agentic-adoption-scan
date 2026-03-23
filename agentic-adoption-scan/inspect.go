@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"log"
@@ -30,8 +31,15 @@ type Inspector struct {
 }
 
 // Inspect reads scan results and fetches content for found indicators.
+// scanResultsPath may be a CSV file or a Parquet file/directory.
 func (insp *Inspector) Inspect(scanResultsPath string) ([]InspectResult, error) {
-	entries, err := readFoundIndicators(scanResultsPath)
+	var entries []foundEntry
+	var err error
+	if strings.HasSuffix(scanResultsPath, ".parquet") || isParquetDir(scanResultsPath) {
+		entries, err = readFoundIndicatorsParquet(scanResultsPath)
+	} else {
+		entries, err = readFoundIndicators(scanResultsPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading scan results: %w", err)
 	}
@@ -133,6 +141,60 @@ func readFoundIndicators(path string) ([]foundEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// isParquetDir returns true if path is a directory containing .parquet files.
+func isParquetDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// readFoundIndicatorsParquet reads found indicators from a Parquet scan output.
+// path may be a single .parquet file or a partitioned directory.
+func readFoundIndicatorsParquet(scanResultsPath string) ([]foundEntry, error) {
+	store := &LocalStore{}
+	files, err := store.List(context.Background(), scanResultsPath)
+	if err != nil {
+		// Try as a single file.
+		rows, err2 := ReadScanRows(store, scanResultsPath)
+		if err2 != nil {
+			return nil, fmt.Errorf("reading parquet: %w", err)
+		}
+		return entriesFromScanRows(rows), nil
+	}
+	if len(files) == 0 {
+		// Single file path with .parquet extension but List returned nothing.
+		rows, err := ReadScanRows(store, scanResultsPath)
+		if err != nil {
+			return nil, err
+		}
+		return entriesFromScanRows(rows), nil
+	}
+	var all []ScanRow
+	for _, f := range files {
+		rows, err := ReadScanRows(store, f)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", f, err)
+		}
+		all = append(all, rows...)
+	}
+	return entriesFromScanRows(all), nil
+}
+
+func entriesFromScanRows(rows []ScanRow) []foundEntry {
+	var entries []foundEntry
+	for _, r := range rows {
+		if !r.Found || r.FilePath == "" {
+			continue
+		}
+		entries = append(entries, foundEntry{
+			repo:      r.Repo,
+			category:  r.Category,
+			indicator: r.Indicator,
+			filePath:  r.FilePath,
+		})
+	}
+	return entries
 }
 
 // summarizeContent extracts key details from file content based on indicator type.
