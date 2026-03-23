@@ -18,7 +18,7 @@ jobs:
     name: Deploy and test on Posit Connect
     runs-on: ubuntu-latest
     # Skip gracefully if the license secret is absent (forks, community PRs)
-    if: ${{ vars.CONNECT_LICENSE_AVAILABLE == 'true' || github.repository_owner == 'posit-dev' }}
+    if: ${{ (vars.CONNECT_LICENSE_AVAILABLE == 'true' || github.repository_owner == 'posit-dev') && secrets.CONNECT_LICENSE != '' }}
 
     steps:
       # ── Checkout & build ─────────────────────────────────────────────────
