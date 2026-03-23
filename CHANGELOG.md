@@ -1,6 +1,30 @@
 # CHANGELOG
 
 
+## v0.0.2 (2026-03-23)
+
+### Bug Fixes
+
+- **release**: Run go mod tidy in agentic-adoption-scan dir and add goreleaser dry-run to PR checks
+  ([`72e68fc`](https://github.com/posit-dev/eng-effectiveness-metrics-tools/commit/72e68fc6ea948169b330d04c0ab9c18e7c6d81db))
+
+The before hook was running 'go mod tidy' in the repo root where there is no go.mod file. Fix by
+  specifying dir: agentic-adoption-scan for the hook.
+
+Add a PR checks workflow that runs goreleaser in snapshot mode to catch release configuration errors
+  before they reach main.
+
+https://claude.ai/code/session_01HRudjsZUpDGNzKE8Bq6Pa3
+
+- **release**: Use go mod tidy -C flag instead of invalid hook object form
+  ([`b5453d1`](https://github.com/posit-dev/eng-effectiveness-metrics-tools/commit/b5453d1c14506bb7cb5fd9395f987c92d290c64e))
+
+goreleaser v2 before.hooks only accepts plain strings, not objects with cmd/dir fields. Use 'go mod
+  tidy -C agentic-adoption-scan' (Go 1.21+ flag) to run the command in the correct directory.
+
+https://claude.ai/code/session_01HRudjsZUpDGNzKE8Bq6Pa3
+
+
 ## v0.0.1 (2026-03-23)
 
 ### Bug Fixes
