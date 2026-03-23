@@ -14,7 +14,7 @@ Commands:
   scan         Detect agentic coding indicators across an org's repos
   inspect      Fetch and analyze content of detected indicators
   init-config  Generate a starter config file with all built-in indicators
-  serve        Run as an MCP server (stdio transport) for Claude Code
+  serve        Run as an MCP server (stdio or Streamable HTTP transport)
 
 Run 'agentic-adoption-scan <command> -help' for command-specific flags.
 `
@@ -202,6 +202,9 @@ func runServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cacheDir := fs.String("cache-dir", ".agentic-scan-cache", "Directory for scan state cache")
 	configPath := fs.String("config", "", "Path to indicators config file (YAML)")
+	transport := fs.String("transport", "stdio", "Transport to use: stdio or http")
+	host := fs.String("host", "0.0.0.0", "Host to bind to (http transport only)")
+	port := fs.String("port", defaultPort(), "Port to listen on (http transport only)")
 
 	fs.Parse(args)
 
@@ -213,10 +216,31 @@ func runServe(args []string) {
 		ConfigPath: *configPath,
 	}
 
-	if err := StartMCPServer(cfg); err != nil {
+	var err error
+	switch *transport {
+	case "stdio":
+		err = StartMCPServer(cfg)
+	case "http":
+		addr := fmt.Sprintf("%s:%s", *host, *port)
+		err = StartMCPHTTPServer(cfg, addr)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown transport: %s (must be stdio or http)\n", *transport)
+		os.Exit(1)
+	}
+
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// defaultPort returns the PORT environment variable if set, otherwise "8080".
+// Posit Connect injects PORT into the process environment.
+func defaultPort() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+	return "8080"
 }
 
 func runInitConfig(args []string) {
