@@ -2,64 +2,40 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
-  id-token: write  # Required for PyPI trusted publishing
+    branches:
+      - main
 
 jobs:
-  goreleaser:
-    name: Build and publish Go binaries
+  release:
+    name: Semantic Release
+    # Avoid infinite loop: skip the commit that semantic-release itself pushes
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agentic-adoption-scan/go.mod
-
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean --skip=validate
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-pypi:
-    name: Build and publish Python wheels
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/agentic-adoption-scan
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agentic-adoption-scan/go.mod
+          # SSH deploy key required so the version-bump commit and tag pushed
+          # by semantic-release can trigger downstream workflows (the default
+          # GITHUB_TOKEN cannot trigger other workflow runs).
+          # Setup: generate an ed25519 key pair, add the public key as a repo
+          # deploy key (with write access), and store the private key as the
+          # DEPLOY_KEY Actions secret.
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install go-to-wheel
-        run: pip install go-to-wheel
+      - name: Install python-semantic-release
+        run: pip install python-semantic-release==9.21.0
 
-      - name: Build Python wheels
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          go-to-wheel agentic-adoption-scan \
-            --name agentic-adoption-scan \
-            --version "$VERSION" \
-            --description "Detect agentic coding tool adoption across GitHub organizations" \
-            --url "https://github.com/posit-dev/eng-effectiveness-metrics-tools" \
-            --author "Posit PBC" \
-            --author-email "opensource@posit.co" \
-            --readme README.md
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Run semantic-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release version --push --tag --changelog --vcs-release

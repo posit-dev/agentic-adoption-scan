@@ -132,9 +132,29 @@ Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_su
 
 ## Releases
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please) using [Conventional Commits](https://www.conventionalcommits.org/). On every merge to `main`, release-please analyzes commit messages and opens a release PR when there are releasable changes. Merging that PR tags a new version and triggers the release workflow, which:
+Releases are fully automated via [python-semantic-release](https://python-semantic-release.readthedocs.io/) on every merge to `main`. The version bump is determined automatically from [Conventional Commit](https://www.conventionalcommits.org/) PR titles (enforced by the `pr-title` workflow):
+
+| PR title prefix | Version bump |
+|---|---|
+| `fix:` | patch — `0.1.0` → `0.1.1` |
+| `feat:` | minor — `0.1.1` → `0.2.0` |
+| `feat!:` / `BREAKING CHANGE:` | major — `0.2.0` → `1.0.0` |
+| `chore:`, `docs:`, `refactor:`, etc. | no release |
+
+On every merge to `main`, semantic-release analyzes commits since the last tag. If there are releasable changes, it creates a `CHANGELOG.md` entry, commits it, tags the new version (e.g. `v0.2.0`), and publishes a GitHub release — all in one step. That tag push then triggers the publish workflow, which:
 
 1. Builds native binaries for macOS (amd64/arm64) and Linux (amd64/arm64) via [GoReleaser](https://goreleaser.com/)
 2. Publishes Python wheels for all platforms to [PyPI](https://pypi.org/project/agentic-adoption-scan/) via [go-to-wheel](https://github.com/simonw/go-to-wheel)
 
-> **PyPI setup:** The `publish-pypi` workflow uses [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). To enable it, configure a Trusted Publisher on PyPI for this repository pointing to the `release.yml` workflow and the `pypi` environment.
+### One-time setup required
+
+**Deploy key** — semantic-release pushes back to `main` and needs to trigger the publish workflow. The default `GITHUB_TOKEN` cannot do this, so an SSH deploy key is required:
+
+```bash
+ssh-keygen -t ed25519 -C "semantic-release" -f deploy_key -N ""
+```
+
+1. Add `deploy_key.pub` as a repo **Deploy key** with write access: _Settings → Deploy keys_
+2. Add `deploy_key` (private) as an Actions secret named **`DEPLOY_KEY`**: _Settings → Secrets and variables → Actions_
+
+**PyPI Trusted Publisher** — the publish workflow uses [OIDC Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (no API token needed). Configure a Trusted Publisher on PyPI for this repository pointing to the `publish.yml` workflow and the `pypi` environment.
