@@ -19,8 +19,8 @@ type MCPServerConfig struct {
 	ConfigPath string
 }
 
-// StartMCPServer creates and runs the MCP server over stdio.
-func StartMCPServer(cfg MCPServerConfig) error {
+// newMCPServer creates an MCP server with all tools registered.
+func newMCPServer(cfg MCPServerConfig) *server.MCPServer {
 	s := server.NewMCPServer(
 		"agentic-adoption-scan",
 		"1.0.0",
@@ -33,7 +33,25 @@ func StartMCPServer(cfg MCPServerConfig) error {
 	s.AddTool(getRepoSummaryTool(), makeRepoSummaryHandler(cfg))
 	s.AddTool(getAdoptionSummaryTool(), makeAdoptionSummaryHandler(cfg))
 
-	return server.ServeStdio(s)
+	return s
+}
+
+// StartMCPServer creates and runs the MCP server over stdio.
+func StartMCPServer(cfg MCPServerConfig) error {
+	return server.ServeStdio(newMCPServer(cfg))
+}
+
+// StartMCPHTTPServer creates and runs the MCP server over Streamable HTTP with
+// stateless mode. This is the required transport for Posit Connect deployments.
+// The MCP endpoint is mounted at /mcp per the Posit Connect convention.
+func StartMCPHTTPServer(cfg MCPServerConfig, addr string) error {
+	httpServer := server.NewStreamableHTTPServer(newMCPServer(cfg),
+		server.WithStateLess(true),
+		server.WithEndpointPath("/mcp"),
+	)
+
+	cfg.Logger.Printf("Starting MCP HTTP server on %s/mcp", addr)
+	return httpServer.Start(addr)
 }
 
 // --- Tool definitions ---
