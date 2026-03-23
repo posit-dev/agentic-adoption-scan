@@ -11,8 +11,9 @@ import (
 const usage = `Usage: agentic-adoption-scan <command> [flags]
 
 Commands:
-  scan      Detect agentic coding indicators across an org's repos
-  inspect   Fetch and analyze content of detected indicators
+  scan         Detect agentic coding indicators across an org's repos
+  inspect      Fetch and analyze content of detected indicators
+  init-config  Generate a starter config file with all built-in indicators
 
 Run 'agentic-adoption-scan <command> -help' for command-specific flags.
 `
@@ -28,6 +29,8 @@ func main() {
 		runScan(os.Args[2:])
 	case "inspect":
 		runInspect(os.Args[2:])
+	case "init-config":
+		runInitConfig(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n%s", os.Args[1], usage)
 		os.Exit(1)
@@ -42,6 +45,7 @@ func runScan(args []string) {
 	includeArchived := fs.Bool("include-archived", false, "Include archived repos")
 	force := fs.Bool("force", false, "Bypass cache and rescan everything")
 	cacheDir := fs.String("cache-dir", ".agentic-scan-cache", "Directory for scan state cache")
+	configPath := fs.String("config", "", "Path to indicators config file (YAML)")
 	verbose := fs.Bool("verbose", false, "Enable verbose logging")
 
 	fs.Parse(args)
@@ -67,11 +71,32 @@ func runScan(args []string) {
 
 	cutoff := time.Now().AddDate(0, 0, -*days)
 
+	// Resolve indicators from config file or defaults
+	var cfg *Config
+	if *configPath != "" {
+		var err error
+		cfg, err = LoadConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	indicators, err := ResolveIndicators(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving indicators: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "Using %d indicators", len(indicators))
+	if cfg != nil {
+		fmt.Fprintf(os.Stderr, " (config mode: %s)", cfg.Mode)
+	}
+	fmt.Fprintln(os.Stderr)
+
 	scanner := &Scanner{
 		Client:          ghClient,
 		Cache:           cache,
 		Org:             *org,
-		Indicators:      DefaultIndicators(),
+		Indicators:      indicators,
 		ActiveSince:     cutoff,
 		IncludeArchived: *includeArchived,
 		Force:           *force,
@@ -168,6 +193,31 @@ func countUniqueRepos(results []ScanResult) int {
 		seen[r.Repo] = true
 	}
 	return len(seen)
+}
+
+func runInitConfig(args []string) {
+	fs := flag.NewFlagSet("init-config", flag.ExitOnError)
+	output := fs.String("output", "indicators.yaml", "Output config file path")
+
+	fs.Parse(args)
+
+	data, err := GenerateDefaultConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating config: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *output == "-" {
+		os.Stdout.Write(data)
+		return
+	}
+
+	if err := os.WriteFile(*output, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "Config written to %s\n", *output)
 }
 
 type nopWriter struct{}
