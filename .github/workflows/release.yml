@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    name: Semantic Release
+    # Avoid infinite loop: skip the commit that semantic-release itself pushes
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # SSH deploy key required so the version-bump commit and tag pushed
+          # by semantic-release can trigger downstream workflows (the default
+          # GITHUB_TOKEN cannot trigger other workflow runs).
+          # Setup: generate an ed25519 key pair, add the public key as a repo
+          # deploy key (with write access), and store the private key as the
+          # DEPLOY_KEY Actions secret.
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install python-semantic-release
+        run: pip install python-semantic-release==9.21.0
+
+      - name: Run semantic-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release version --push --tag --changelog --vcs-release

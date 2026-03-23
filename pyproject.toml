@@ -1,0 +1,13 @@
+[tool.semantic_release]
+major_on_zero = false
+tag_format = "v{version}"
+commit_message = "chore(release): {version}"
+
+[tool.semantic_release.remote]
+# Use the SSH deploy key instead of GITHUB_TOKEN for pushing commits/tags,
+# so downstream workflows (goreleaser, PyPI publish) are triggered correctly.
+ignore_token_for_push = true
+
+[tool.semantic_release.changelog]
+generate = true
+file = "CHANGELOG.md"
