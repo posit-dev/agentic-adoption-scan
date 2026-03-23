@@ -14,6 +14,7 @@ Commands:
   scan         Detect agentic coding indicators across an org's repos
   inspect      Fetch and analyze content of detected indicators
   init-config  Generate a starter config file with all built-in indicators
+  serve        Run as an MCP server (stdio transport) for Claude Code
 
 Run 'agentic-adoption-scan <command> -help' for command-specific flags.
 `
@@ -31,6 +32,8 @@ func main() {
 		runInspect(os.Args[2:])
 	case "init-config":
 		runInitConfig(os.Args[2:])
+	case "serve":
+		runServe(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n%s", os.Args[1], usage)
 		os.Exit(1)
@@ -193,6 +196,27 @@ func countUniqueRepos(results []ScanResult) int {
 		seen[r.Repo] = true
 	}
 	return len(seen)
+}
+
+func runServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	cacheDir := fs.String("cache-dir", ".agentic-scan-cache", "Directory for scan state cache")
+	configPath := fs.String("config", "", "Path to indicators config file (YAML)")
+
+	fs.Parse(args)
+
+	logger := log.New(os.Stderr, "[mcp] ", log.LstdFlags)
+
+	cfg := MCPServerConfig{
+		Logger:     logger,
+		CacheDir:   *cacheDir,
+		ConfigPath: *configPath,
+	}
+
+	if err := StartMCPServer(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runInitConfig(args []string) {
