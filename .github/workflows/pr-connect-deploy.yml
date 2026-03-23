@@ -1,0 +1,94 @@
+name: Connect Deployment Test
+
+# Proves that the Python MCP wrapper deploys to Posit Connect and each tool
+# is reachable via the Streamable HTTP MCP transport.
+#
+# Requires the CONNECT_LICENSE secret (base64-encoded .lic file) — set this
+# in the repo's Settings → Secrets and variables → Actions.
+#
+# The workflow uses posit-dev/with-connect to spin up an ephemeral Connect
+# container (Docker), deploys the wrapper with rsconnect-python, then runs
+# the pytest test suite in evals/connect/.
+
+on:
+  pull_request:
+
+jobs:
+  connect-deploy-test:
+    name: Deploy and test on Posit Connect
+    runs-on: ubuntu-latest
+    # Skip gracefully if the license secret is absent (forks, community PRs)
+    if: ${{ vars.CONNECT_LICENSE_AVAILABLE == 'true' || github.repository_owner == 'posit-dev' }}
+
+    steps:
+      # ── Checkout & build ─────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentic-adoption-scan/go.mod
+
+      # Build the binary and place it next to the Python wrapper so that the
+      # Connect deployment picks it up during the deploy step.
+      - name: Build agentic-adoption-scan binary
+        working-directory: agentic-adoption-scan
+        run: go build -o ../connect/agentic-adoption-scan .
+
+      # ── Start ephemeral Posit Connect ─────────────────────────────────────
+      # posit-dev/with-connect pulls the official Connect Docker image, starts
+      # it, bootstraps an admin account, and outputs the server URL + API key.
+      # The container is automatically stopped when the job ends.
+      - name: Start Posit Connect
+        id: connect
+        uses: posit-dev/with-connect@v1
+        with:
+          license: ${{ secrets.CONNECT_LICENSE }}
+
+      # ── Deploy the MCP server ─────────────────────────────────────────────
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install rsconnect-python and test deps
+        run: pip install rsconnect-python pytest httpx mcp
+
+      # Install the agentic-adoption-scan Python package so Connect can find
+      # the binary at runtime (the local binary copy is also present as a
+      # fallback for this test-only deployment).
+      - name: Install connect wrapper dependencies
+        working-directory: connect
+        run: pip install -r requirements.txt
+
+      - name: Deploy MCP server to Connect
+        working-directory: connect
+        env:
+          CONNECT_SERVER: ${{ steps.connect.outputs.url }}
+          CONNECT_API_KEY: ${{ steps.connect.outputs.api-key }}
+        run: |
+          rsconnect deploy fastapi \
+            --server "$CONNECT_SERVER" \
+            --api-key "$CONNECT_API_KEY" \
+            --entrypoint server:mcp \
+            --title "agentic-adoption-scan-mcp-ci-test" \
+            --new \
+            .
+
+      # ── Run deployment tests ──────────────────────────────────────────────
+      - name: Run Connect deployment tests
+        working-directory: evals/connect
+        env:
+          CONNECT_SERVER: ${{ steps.connect.outputs.url }}
+          CONNECT_API_KEY: ${{ steps.connect.outputs.api-key }}
+        run: |
+          pip install -e .
+          pytest test_connect_deploy.py -v -m connect \
+            --tb=short \
+            --junit-xml=/tmp/connect-test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connect-test-results
+          path: /tmp/connect-test-results.xml
+          retention-days: 30

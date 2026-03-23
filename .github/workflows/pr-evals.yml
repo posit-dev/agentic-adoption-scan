@@ -1,0 +1,82 @@
+name: MCP Evals
+
+on:
+  pull_request:
+
+jobs:
+  # ─── Layer 1 & 2: Inspect AI deterministic + semantic evals ──────────────
+  inspect-evals:
+    name: Inspect AI evals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agentic-adoption-scan/go.mod
+
+      # Build the binary so the evals can call it via subprocess
+      - name: Build agentic-adoption-scan
+        working-directory: agentic-adoption-scan
+        run: go build -o agentic-adoption-scan .
+
+      - name: Add binary to PATH
+        run: echo "${{ github.workspace }}/agentic-adoption-scan" >> $GITHUB_PATH
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install eval dependencies
+        working-directory: evals/inspect
+        run: pip install -e .
+
+      # ── Deterministic structure evals (no API key needed) ─────────────────
+      - name: Run list_indicators_structure eval
+        working-directory: evals/inspect
+        run: |
+          inspect eval mcp_eval_tasks.py \
+            --task list_indicators_structure \
+            --no-score-display \
+            --log-dir /tmp/inspect-logs
+
+      - name: Run list_indicators_schema eval
+        working-directory: evals/inspect
+        run: |
+          inspect eval mcp_eval_tasks.py \
+            --task list_indicators_schema \
+            --no-score-display \
+            --log-dir /tmp/inspect-logs
+
+      # ── Semantic quality evals (needs ANTHROPIC_API_KEY) ──────────────────
+      - name: Run list_indicators_quality eval
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        working-directory: evals/inspect
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          inspect eval mcp_eval_tasks.py \
+            --task list_indicators_quality \
+            --model anthropic/claude-haiku-4-5-20251001 \
+            --log-dir /tmp/inspect-logs
+
+      # ── Integration evals (needs GITHUB_TOKEN) ────────────────────────────
+      - name: Run adoption_agent_eval
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        working-directory: evals/inspect
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          inspect eval mcp_eval_tasks.py \
+            --task adoption_agent_eval \
+            --model anthropic/claude-haiku-4-5-20251001 \
+            --log-dir /tmp/inspect-logs
+
+      - name: Upload eval logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-eval-logs
+          path: /tmp/inspect-logs/
+          retention-days: 30

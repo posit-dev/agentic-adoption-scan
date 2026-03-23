@@ -1,0 +1,29 @@
+[
+  {
+    "input": "Call the list_indicators MCP tool and verify it returns all expected categories",
+    "target": "The response must contain JSON with keys: claude-code, github-copilot, cursor, mcp, evals, agents-config, workflows-ai",
+    "metadata": {
+      "tool": "list_indicators",
+      "requires_github": false,
+      "eval_type": "structure"
+    }
+  },
+  {
+    "input": "Call list_indicators and check that the evals category includes promptfoo, inspect_ai, and mcp-evals indicators",
+    "target": "The evals category must contain indicators for promptfoo config, inspect AI, and mcp-evals",
+    "metadata": {
+      "tool": "list_indicators",
+      "requires_github": false,
+      "eval_type": "content"
+    }
+  },
+  {
+    "input": "Call list_indicators and verify every indicator has the required fields: name, search_type, target",
+    "target": "Every indicator entry must have non-empty name, search_type, and target fields",
+    "metadata": {
+      "tool": "list_indicators",
+      "requires_github": false,
+      "eval_type": "schema"
+    }
+  }
+]
