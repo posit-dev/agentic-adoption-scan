@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.1.0 (2026-03-23)
+
+### Features
+
+- Add Posit Connect deployment support for MCP server
+  ([`6f9bd91`](https://github.com/posit-dev/eng-effectiveness-metrics-tools/commit/6f9bd91d045b899b34a162e58c987148c8508a3d))
+
+- Add connect/server.py: Python FastMCP entry point (server:mcp) that delegates to the
+  agentic-adoption-scan binary via subprocess, making all 5 MCP tools available as ASGI-compatible
+  handlers for Connect - Add connect/requirements.txt: agentic-adoption-scan + mcp[cli] - Add README
+  section: step-by-step Connect deployment with exact rsconnect write-manifest and rsconnect deploy
+  fastapi commands, GITHUB_TOKEN env var setup, Claude Code client config, and perf tip
+
+https://claude.ai/code/session_01Mprf54Ag5ruWuMNR728CTj
+
+
 ## v0.0.2 (2026-03-23)
 
 ### Bug Fixes
