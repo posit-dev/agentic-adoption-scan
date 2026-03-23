@@ -3,8 +3,7 @@ version: 2
 
 before:
   hooks:
-    - cmd: go mod tidy
-      dir: agentic-adoption-scan
+    - go mod tidy -C agentic-adoption-scan
 
 builds:
   - id: agentic-adoption-scan
