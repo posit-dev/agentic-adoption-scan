@@ -67,12 +67,20 @@ func StartMCPHTTPServer(cfg MCPServerConfig, addr string) error {
 		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
 			auth := r.Header.Get("Authorization")
 			if strings.HasPrefix(auth, "Bearer ") {
-				token := strings.TrimPrefix(auth, "Bearer ")
-				ctx = context.WithValue(ctx, githubTokenKey, token)
+				token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+				if token != "" {
+					ctx = context.WithValue(ctx, githubTokenKey, token)
+				}
 			}
 			return ctx
 		}),
 	)
+
+	// Start periodic cleanup of stale per-user rate limit entries
+	if cfg.RateLimitTracker != nil {
+		stop := make(chan struct{})
+		cfg.RateLimitTracker.StartCleanup(30*time.Minute, 1*time.Hour, stop)
+	}
 
 	cfg.Logger.Printf("Starting MCP HTTP server on %s/mcp", addr)
 	return httpServer.Start(addr)
