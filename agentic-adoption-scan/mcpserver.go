@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -12,11 +13,26 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+// contextKeyType is an unexported type for context keys to avoid collisions.
+type contextKeyType struct{}
+
+// githubTokenKey is the context key for the per-request GitHub token.
+var githubTokenKey = contextKeyType{}
+
+// githubTokenFromContext retrieves the GitHub token injected into the context.
+func githubTokenFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(githubTokenKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // MCPServerConfig holds shared state for MCP tool handlers.
 type MCPServerConfig struct {
-	Logger    *log.Logger
-	CacheDir  string
-	ConfigPath string
+	Logger           *log.Logger
+	CacheDir         string
+	ConfigPath       string
+	RateLimitTracker *RateLimitTracker
 }
 
 // newMCPServer creates an MCP server with all tools registered.
@@ -48,6 +64,14 @@ func StartMCPHTTPServer(cfg MCPServerConfig, addr string) error {
 	httpServer := server.NewStreamableHTTPServer(newMCPServer(cfg),
 		server.WithStateLess(true),
 		server.WithEndpointPath("/mcp"),
+		server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
+			auth := r.Header.Get("Authorization")
+			if strings.HasPrefix(auth, "Bearer ") {
+				token := strings.TrimPrefix(auth, "Bearer ")
+				ctx = context.WithValue(ctx, githubTokenKey, token)
+			}
+			return ctx
+		}),
 	)
 
 	cfg.Logger.Printf("Starting MCP HTTP server on %s/mcp", addr)
@@ -96,6 +120,25 @@ func getAdoptionSummaryTool() mcp.Tool {
 	)
 }
 
+// --- Helpers ---
+
+// newGitHubClientFromContext creates a GitHubClient using the token in ctx (if present),
+// falling back to env-var token lookup. The shared RateLimitTracker from cfg is attached
+// when non-nil so per-user rate limit state is shared across requests.
+func newGitHubClientFromContext(ctx context.Context, cfg MCPServerConfig) *GitHubClient {
+	token := githubTokenFromContext(ctx)
+	var client *GitHubClient
+	if token != "" {
+		client = NewGitHubClientWithToken(token, cfg.Logger)
+	} else {
+		client = NewGitHubClient(cfg.Logger)
+	}
+	if cfg.RateLimitTracker != nil {
+		client.rateLimitTracker = cfg.RateLimitTracker
+	}
+	return client
+}
+
 // --- Tool handlers ---
 
 func makeScanHandler(cfg MCPServerConfig) server.ToolHandlerFunc {
@@ -110,7 +153,7 @@ func makeScanHandler(cfg MCPServerConfig) server.ToolHandlerFunc {
 		force := req.GetBool("force", false)
 		foundOnly := req.GetBool("found_only", true)
 
-		ghClient := NewGitHubClient(cfg.Logger)
+		ghClient := newGitHubClientFromContext(ctx, cfg)
 
 		cache, err := LoadCache(cfg.CacheDir)
 		if err != nil {
@@ -178,7 +221,7 @@ func makeInspectHandler(cfg MCPServerConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		ghClient := NewGitHubClient(cfg.Logger)
+		ghClient := newGitHubClientFromContext(ctx, cfg)
 
 		// First scan the repo to find indicators
 		indicators, err := resolveIndicatorsFromConfig(cfg.ConfigPath)

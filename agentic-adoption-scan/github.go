@@ -1,25 +1,87 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
-	"os/exec"
+	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// GitHubClient wraps the gh CLI with rate limiting.
-type GitHubClient struct {
-	mu              sync.Mutex
-	logger          *log.Logger
+// RateLimitTracker tracks per-user rate limit state, keyed by a hash of the token.
+// It can be shared across multiple GitHubClient instances (e.g. in the MCP HTTP server).
+type RateLimitTracker struct {
+	mu      sync.Mutex
+	perUser map[string]*userRateState
+}
+
+type userRateState struct {
 	searchLastCall  time.Time
-	searchMinDelay  time.Duration // minimum delay between code search calls
 	rateLimitRemain int
 	rateLimitReset  time.Time
+	lastSeen        time.Time
+}
+
+// NewRateLimitTracker creates a new RateLimitTracker.
+func NewRateLimitTracker() *RateLimitTracker {
+	return &RateLimitTracker{
+		perUser: make(map[string]*userRateState),
+	}
+}
+
+// getOrCreate returns the rate state for a token key, creating it if absent.
+func (t *RateLimitTracker) getOrCreate(tokenKey string) *userRateState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if s, ok := t.perUser[tokenKey]; ok {
+		s.lastSeen = time.Now()
+		return s
+	}
+	s := &userRateState{
+		rateLimitRemain: 100, // assume budget until told otherwise
+		lastSeen:        time.Now(),
+	}
+	t.perUser[tokenKey] = s
+	return s
+}
+
+// CleanupStale removes entries that haven't been used within maxAge.
+func (t *RateLimitTracker) CleanupStale(maxAge time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for k, s := range t.perUser {
+		if s.lastSeen.Before(cutoff) {
+			delete(t.perUser, k)
+		}
+	}
+}
+
+// tokenKey returns a short, stable key for a token (sha256, first 16 hex chars).
+func tokenKey(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// GitHubClient wraps the GitHub API with rate limiting.
+type GitHubClient struct {
+	mu               sync.Mutex // local mutex, used when rateLimitTracker is nil
+	logger           *log.Logger
+	token            string
+	httpClient       *http.Client
+	searchMinDelay   time.Duration // minimum delay between code search calls
+	rateLimitRemain  int           // local fallback when tracker is nil
+	rateLimitReset   time.Time     // local fallback when tracker is nil
+	searchLastCall   time.Time     // local fallback when tracker is nil
+	rateLimitTracker *RateLimitTracker
 }
 
 // Repo represents a GitHub repository from the API.
@@ -42,26 +104,35 @@ type SearchResult struct {
 	} `json:"items"`
 }
 
+// NewGitHubClient creates a client that reads the token from GH_TOKEN or GITHUB_TOKEN env vars.
 func NewGitHubClient(logger *log.Logger) *GitHubClient {
+	token := os.Getenv("GH_TOKEN")
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	return NewGitHubClientWithToken(token, logger)
+}
+
+// NewGitHubClientWithToken creates a client using the provided token.
+func NewGitHubClientWithToken(token string, logger *log.Logger) *GitHubClient {
 	return &GitHubClient{
 		logger:          logger,
+		token:           token,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		searchMinDelay:  2100 * time.Millisecond, // stay under 30 req/min for code search
 		rateLimitRemain: 100,                      // assume we have budget until told otherwise
 	}
 }
 
-// ghAPI calls the GitHub API via the gh CLI and returns raw JSON output.
-// It handles rate limiting and retries.
-func (c *GitHubClient) ghAPI(method, endpoint string, fields ...string) ([]byte, error) {
+const githubAPIBase = "https://api.github.com"
+
+// ghAPI calls the GitHub REST API and returns the raw JSON body.
+// It handles rate limiting (HTTP 403/429) and retries with backoff.
+func (c *GitHubClient) ghAPI(method, endpoint string) ([]byte, *http.Response, error) {
 	c.waitForRateLimit()
 
-	args := []string{"api", "--method", method}
-	args = append(args, "-H", "Accept: application/vnd.github+json")
-	args = append(args, "-H", "X-GitHub-Api-Version: 2022-11-28")
-	for _, f := range fields {
-		args = append(args, "-f", f)
-	}
-	args = append(args, endpoint)
+	// Build the full URL. Endpoints from callers start with "/".
+	rawURL := githubAPIBase + endpoint
 
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
@@ -72,62 +143,151 @@ func (c *GitHubClient) ghAPI(method, endpoint string, fields ...string) ([]byte,
 			time.Sleep(backoff + jitter)
 		}
 
-		cmd := exec.Command("gh", args...)
-		out, err := cmd.CombinedOutput()
+		req, err := http.NewRequest(method, rawURL, nil)
 		if err != nil {
-			outStr := string(out)
-			// Check for rate limiting
-			if strings.Contains(outStr, "rate limit") || strings.Contains(outStr, "403") || strings.Contains(outStr, "secondary rate limit") {
-				lastErr = fmt.Errorf("rate limited: %s", outStr)
-				continue
-			}
-			lastErr = fmt.Errorf("gh api error: %w\n%s", err, outStr)
-			// Only retry on rate limits, not other errors
-			return nil, lastErr
+			return nil, nil, fmt.Errorf("building request: %w", err)
 		}
 
-		c.updateRateLimit(out)
-		return out, nil
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("http request: %w", err)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("reading response body: %w", err)
+			continue
+		}
+
+		// Update rate limit state from response headers
+		c.updateRateLimit(resp)
+
+		// Handle rate limiting
+		if resp.StatusCode == 403 || resp.StatusCode == 429 {
+			lastErr = fmt.Errorf("rate limited (HTTP %d): %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		if resp.StatusCode >= 400 {
+			return nil, resp, fmt.Errorf("github api error (HTTP %d): %s", resp.StatusCode, string(body))
+		}
+
+		return body, resp, nil
 	}
-	return nil, fmt.Errorf("exhausted retries: %w", lastErr)
+	return nil, nil, fmt.Errorf("exhausted retries: %w", lastErr)
 }
 
-// ghAPIPaginated fetches all pages of a paginated endpoint.
+// ghAPIPaginated fetches all pages of a paginated endpoint, using the Link header.
 func (c *GitHubClient) ghAPIPaginated(endpoint string) ([]json.RawMessage, error) {
 	var allItems []json.RawMessage
-	page := 1
-	perPage := 100
 
-	for {
-		sep := "?"
-		if strings.Contains(endpoint, "?") {
-			sep = "&"
-		}
-		pagedEndpoint := fmt.Sprintf("%s%sper_page=%d&page=%d", endpoint, sep, perPage, page)
+	// Build initial URL with per_page=100
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	nextURL := githubAPIBase + endpoint + sep + "per_page=100"
 
-		out, err := c.ghAPI("GET", pagedEndpoint)
+	for nextURL != "" {
+		c.waitForRateLimit()
+
+		req, err := http.NewRequest("GET", nextURL, nil)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("building request: %w", err)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+
+		var lastErr error
+		var body []byte
+		var resp *http.Response
+
+		for attempt := 0; attempt < 4; attempt++ {
+			if attempt > 0 {
+				backoff := time.Duration(1<<uint(attempt)) * time.Second
+				jitter := time.Duration(rand.Intn(500)) * time.Millisecond
+				c.logger.Printf("Rate limited, retrying in %v (attempt %d)", backoff+jitter, attempt+1)
+				time.Sleep(backoff + jitter)
+			}
+
+			resp, err = c.httpClient.Do(req)
+			if err != nil {
+				lastErr = fmt.Errorf("http request: %w", err)
+				continue
+			}
+
+			body, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = fmt.Errorf("reading response body: %w", err)
+				continue
+			}
+
+			c.updateRateLimit(resp)
+
+			if resp.StatusCode == 403 || resp.StatusCode == 429 {
+				lastErr = fmt.Errorf("rate limited (HTTP %d): %s", resp.StatusCode, string(body))
+				continue
+			}
+
+			if resp.StatusCode >= 400 {
+				return nil, fmt.Errorf("github api error (HTTP %d): %s", resp.StatusCode, string(body))
+			}
+
+			lastErr = nil
+			break
+		}
+		if lastErr != nil {
+			return nil, fmt.Errorf("exhausted retries: %w", lastErr)
 		}
 
 		var items []json.RawMessage
-		if err := json.Unmarshal(out, &items); err != nil {
-			return nil, fmt.Errorf("failed to parse response page %d: %w", page, err)
-		}
-
-		if len(items) == 0 {
-			break
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, fmt.Errorf("failed to parse paginated response: %w", err)
 		}
 
 		allItems = append(allItems, items...)
 
-		if len(items) < perPage {
-			break
-		}
-		page++
+		// Parse Link header for next page
+		nextURL = parseLinkNext(resp.Header.Get("Link"))
 	}
 
 	return allItems, nil
+}
+
+// parseLinkNext extracts the URL for rel="next" from a Link header value.
+func parseLinkNext(header string) string {
+	if header == "" {
+		return ""
+	}
+	// Link: <https://api.github.com/...?page=2>; rel="next", <...>; rel="last"
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		segments := strings.Split(part, ";")
+		if len(segments) < 2 {
+			continue
+		}
+		urlPart := strings.TrimSpace(segments[0])
+		relPart := strings.TrimSpace(segments[1])
+		if relPart == `rel="next"` {
+			// Strip angle brackets
+			urlPart = strings.TrimPrefix(urlPart, "<")
+			urlPart = strings.TrimSuffix(urlPart, ">")
+			return urlPart
+		}
+	}
+	return ""
 }
 
 // ListOrgRepos lists all repositories in an organization.
@@ -158,8 +318,11 @@ func (c *GitHubClient) ListOrgRepos(org string) ([]Repo, error) {
 func (c *GitHubClient) CheckPathExists(owner, repo, path string) (bool, bool, error) {
 	c.logger.Printf("Checking path: %s/%s/%s", owner, repo, path)
 
-	out, err := c.ghAPI("GET", fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
+	out, resp, err := c.ghAPI("GET", fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
 	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return false, false, nil
+		}
 		errStr := err.Error()
 		if strings.Contains(errStr, "404") || strings.Contains(errStr, "Not Found") {
 			return false, false, nil
@@ -190,8 +353,9 @@ func (c *GitHubClient) SearchCode(org, repo, query string) (*SearchResult, error
 	c.logger.Printf("Code search in %s/%s: %s", org, repo, query)
 
 	fullQuery := fmt.Sprintf("%s repo:%s/%s", query, org, repo)
+	encodedQuery := url.QueryEscape(fullQuery)
 
-	out, err := c.ghAPI("GET", fmt.Sprintf("/search/code?q=%s", urlEncode(fullQuery)))
+	out, _, err := c.ghAPI("GET", "/search/code?q="+encodedQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -213,23 +377,58 @@ func (c *GitHubClient) SearchCodeInWorkflows(org, repo, query string) (*SearchRe
 func (c *GitHubClient) GetFileContent(owner, repo, path string) ([]byte, error) {
 	c.logger.Printf("Fetching content: %s/%s/%s", owner, repo, path)
 
-	args := []string{"api", "--method", "GET",
-		"-H", "Accept: application/vnd.github.raw+json",
-		"-H", "X-GitHub-Api-Version: 2022-11-28",
-		fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path),
-	}
+	endpoint := fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path)
+	rawURL := githubAPIBase + endpoint
 
-	cmd := exec.Command("gh", args...)
-	out, err := cmd.CombinedOutput()
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetching file content: %w\n%s", err, string(out))
+		return nil, fmt.Errorf("building request: %w", err)
 	}
 
-	return out, nil
+	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching file content: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading file content: %w", err)
+	}
+
+	c.updateRateLimit(resp)
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fetching file content (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	return body, nil
 }
 
 // throttleSearch enforces the code search rate limit (30 req/min).
 func (c *GitHubClient) throttleSearch() {
+	if c.rateLimitTracker != nil {
+		key := tokenKey(c.token)
+		state := c.rateLimitTracker.getOrCreate(key)
+		c.rateLimitTracker.mu.Lock()
+		defer c.rateLimitTracker.mu.Unlock()
+
+		elapsed := time.Since(state.searchLastCall)
+		if elapsed < c.searchMinDelay {
+			wait := c.searchMinDelay - elapsed
+			c.logger.Printf("Throttling search: waiting %v", wait)
+			time.Sleep(wait)
+		}
+		state.searchLastCall = time.Now()
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -244,6 +443,20 @@ func (c *GitHubClient) throttleSearch() {
 
 // waitForRateLimit checks if we're close to the rate limit and waits if needed.
 func (c *GitHubClient) waitForRateLimit() {
+	if c.rateLimitTracker != nil {
+		key := tokenKey(c.token)
+		state := c.rateLimitTracker.getOrCreate(key)
+		c.rateLimitTracker.mu.Lock()
+		defer c.rateLimitTracker.mu.Unlock()
+
+		if state.rateLimitRemain < 10 && time.Now().Before(state.rateLimitReset) {
+			wait := time.Until(state.rateLimitReset) + time.Second
+			c.logger.Printf("Rate limit low (%d remaining), waiting %v until reset", state.rateLimitRemain, wait)
+			time.Sleep(wait)
+		}
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -254,27 +467,45 @@ func (c *GitHubClient) waitForRateLimit() {
 	}
 }
 
-// updateRateLimit parses rate limit info from response headers embedded in gh output.
-// Note: gh CLI doesn't directly expose headers, so we track via search throttling primarily.
-func (c *GitHubClient) updateRateLimit(body []byte) {
-	// gh CLI doesn't expose response headers directly.
-	// We rely on the search throttle and error-based retry for rate limiting.
-}
+// updateRateLimit parses X-RateLimit-Remaining and X-RateLimit-Reset from HTTP response headers.
+func (c *GitHubClient) updateRateLimit(resp *http.Response) {
+	remainStr := resp.Header.Get("X-RateLimit-Remaining")
+	resetStr := resp.Header.Get("X-RateLimit-Reset")
 
-// urlEncode does minimal URL encoding for search queries.
-func urlEncode(s string) string {
-	s = strings.ReplaceAll(s, " ", "+")
-	s = strings.ReplaceAll(s, ":", "%3A")
-	s = strings.ReplaceAll(s, "/", "%2F")
-	s = strings.ReplaceAll(s, "@", "%40")
-	return s
-}
-
-// parseRateLimitHeader parses a rate limit header value.
-func parseRateLimitHeader(headers map[string]string, key string) int {
-	if v, ok := headers[key]; ok {
-		n, _ := strconv.Atoi(v)
-		return n
+	if remainStr == "" && resetStr == "" {
+		return
 	}
-	return -1
+
+	remain, err := strconv.Atoi(remainStr)
+	if err != nil {
+		remain = -1
+	}
+
+	var reset time.Time
+	if resetUnix, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+		reset = time.Unix(resetUnix, 0)
+	}
+
+	if c.rateLimitTracker != nil {
+		key := tokenKey(c.token)
+		state := c.rateLimitTracker.getOrCreate(key)
+		c.rateLimitTracker.mu.Lock()
+		defer c.rateLimitTracker.mu.Unlock()
+		if remain >= 0 {
+			state.rateLimitRemain = remain
+		}
+		if !reset.IsZero() {
+			state.rateLimitReset = reset
+		}
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if remain >= 0 {
+		c.rateLimitRemain = remain
+	}
+	if !reset.IsZero() {
+		c.rateLimitReset = reset
+	}
 }

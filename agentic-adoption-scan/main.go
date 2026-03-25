@@ -227,9 +227,10 @@ func runServe(args []string) {
 	logger := log.New(os.Stderr, "[mcp] ", log.LstdFlags)
 
 	cfg := MCPServerConfig{
-		Logger:     logger,
-		CacheDir:   *cacheDir,
-		ConfigPath: *configPath,
+		Logger:           logger,
+		CacheDir:         *cacheDir,
+		ConfigPath:       *configPath,
+		RateLimitTracker: NewRateLimitTracker(),
 	}
 
 	var err error

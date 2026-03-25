@@ -30,11 +30,13 @@ pipx install agentic-adoption-scan
 
 ### Prerequisites
 
-The tool uses the `gh` CLI for GitHub authentication. Make sure you have it installed and authenticated:
+The tool requires a GitHub personal access token (PAT) for API access. Set it as an environment variable:
 
 ```bash
-gh auth login
+export GITHUB_TOKEN=<your-github-pat>
 ```
+
+The token needs `repo` scope (or fine-grained equivalent) to read repository contents and code search results. You can also use `GH_TOKEN` (checked first) as an alternative environment variable name.
 
 ### Usage
 
@@ -118,6 +120,16 @@ The tool can run as an MCP server, exposing tools for use directly within Claude
 
 Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_summary`, `get_adoption_summary`.
 
+#### Per-user authentication (HTTP transport)
+
+When running over the HTTP transport (`serve --transport http`), the server supports per-user GitHub tokens via the `Authorization` header. MCP clients can pass a GitHub PAT as a Bearer token:
+
+```
+Authorization: Bearer <github-pat>
+```
+
+This enables multi-user deployments where each user authenticates with their own GitHub credentials, replacing the shared `GITHUB_TOKEN` env var. If no `Authorization` header is present, the server falls back to `GH_TOKEN`/`GITHUB_TOKEN` from the environment.
+
 ### Deploying to Posit Connect
 
 You can deploy the MCP server to [Posit Connect](https://docs.posit.co/connect/user/mcp-servers/) so that AI clients across your organization can access it without running anything locally. The `connect/` directory contains a Python entry point that wraps the binary for Connect's ASGI runtime.
@@ -125,7 +137,6 @@ You can deploy the MCP server to [Posit Connect](https://docs.posit.co/connect/u
 #### Prerequisites
 
 - [rsconnect-python](https://docs.posit.co/rsconnect-python/) installed: `pip install rsconnect-python`
-- The `gh` CLI installed and available in `PATH` on the Connect server (the binary uses it for GitHub API calls)
 - A Posit Connect server URL and API key
 
 #### 1. Set environment variables
@@ -136,7 +147,7 @@ In your Connect content's **Vars** settings (or pass via `--environment` at depl
 GITHUB_TOKEN=<your-github-pat>
 ```
 
-The `gh` CLI reads `GITHUB_TOKEN` automatically, so no interactive `gh auth login` is needed on the server.
+The binary reads `GITHUB_TOKEN` (or `GH_TOKEN`) directly for GitHub API authentication.
 
 #### 2. Write the manifest
 
