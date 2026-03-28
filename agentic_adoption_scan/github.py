@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 GITHUB_API_BASE = "https://api.github.com"
 _SEARCH_MIN_DELAY = 2.1  # seconds — stay under 30 req/min for code search
 
+# Per-resource threshold: wait when remaining drops below this value.
+# core has 5000/hr so 10 is a reasonable buffer; code_search has only
+# 10/min and is already throttled by _SEARCH_MIN_DELAY, so only wait
+# when fully exhausted.
+_RATE_LIMIT_THRESHOLD: dict[str, int] = {
+    "core": 10,
+    "code_search": 1,
+}
+
 
 # ---------------------------------------------------------------------------
 # Rate-limit state
@@ -29,13 +38,21 @@ _SEARCH_MIN_DELAY = 2.1  # seconds — stay under 30 req/min for code search
 
 
 class UserRateState:
-    """Per-user rate limit state (all fields protected by lock)."""
+    """Per-user rate limit state (all fields protected by lock).
+
+    Rate limits are tracked per-resource (core, code_search, etc.) because
+    GitHub uses separate budgets for each.  The ``rate_limits`` dict maps
+    resource name → (remaining, reset_epoch).
+    """
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.search_last_call: float = 0.0
-        self.rate_limit_remain: int = 100  # assume budget until told otherwise
-        self.rate_limit_reset: float = 0.0
+        # Per-resource rate limit state: resource → (remaining, reset_epoch)
+        self.rate_limits: dict[str, tuple[int, float]] = {
+            "core": (100, 0.0),
+            "code_search": (10, 0.0),
+        }
         self.last_seen: float = time.monotonic()
 
 
@@ -163,8 +180,11 @@ class GitHubClient:
 
         # Local fallback state (used when tracker is None)
         self._local_lock = threading.Lock()
-        self._local_rate_limit_remain: int = 100
-        self._local_rate_limit_reset: float = 0.0
+        # Per-resource rate limit state: resource → (remaining, reset_epoch)
+        self._local_rate_limits: dict[str, tuple[int, float]] = {
+            "core": (100, 0.0),
+            "code_search": (10, 0.0),
+        }
         self._local_search_last_call: float = 0.0
 
     @classmethod
@@ -182,12 +202,17 @@ class GitHubClient:
         method: str,
         endpoint: str,
         accept: str = "",
+        resource: str = "core",
     ) -> tuple[bytes, httpx.Response]:
         """Call the GitHub REST API and return (body, response).
 
+        *resource* identifies the rate limit bucket (``"core"``,
+        ``"code_search"``, etc.) so we only wait when that specific
+        bucket is low.
+
         Raises on unrecoverable errors or after exhausting all retries.
         """
-        self._wait_for_rate_limit()
+        self._wait_for_rate_limit(resource)
 
         raw_url = GITHUB_API_BASE + endpoint
         if not accept:
@@ -318,7 +343,7 @@ class GitHubClient:
         full_query = f"{query} repo:{org}/{repo}"
         encoded = urllib.parse.quote(full_query)
 
-        body, _ = self.api("GET", f"/search/code?q={encoded}")
+        body, _ = self.api("GET", f"/search/code?q={encoded}", resource="code_search")
         data = _json.loads(body)
 
         items = [
@@ -377,47 +402,52 @@ class GitHubClient:
         with self._local_lock:
             self._local_search_last_call = time.monotonic()
 
-    def _wait_for_rate_limit(self) -> None:
+    def _wait_for_rate_limit(self, resource: str = "core") -> None:
         """Sleep until the rate limit resets if remaining requests are low."""
+        threshold = _RATE_LIMIT_THRESHOLD.get(resource, 10)
+
         if self._tracker is not None:
             key = _token_key(self._token)
             state = self._tracker.get_or_create(key)
 
             # Read state under per-user lock, sleep OUTSIDE the lock
             with state.lock:
-                should_wait = (
-                    state.rate_limit_remain < 10
-                    and state.rate_limit_reset > time.time()
-                )
-                wait = (state.rate_limit_reset - time.time() + 1.0) if should_wait else 0.0
+                remain, reset = state.rate_limits.get(resource, (100, 0.0))
+                should_wait = remain < threshold and reset > time.time()
+                wait = (reset - time.time() + 1.0) if should_wait else 0.0
 
             if should_wait:
-                self._log.warning("Rate limit low, waiting %.1fs until reset", wait)
+                self._log.warning(
+                    "Rate limit low (%s: %d remaining), waiting %.1fs until reset",
+                    resource, remain, wait,
+                )
                 time.sleep(wait)
             return
 
         # Local fallback
         with self._local_lock:
-            should_wait = (
-                self._local_rate_limit_remain < 10
-                and self._local_rate_limit_reset > time.time()
-            )
-            wait = (
-                (self._local_rate_limit_reset - time.time() + 1.0) if should_wait else 0.0
-            )
+            remain, reset = self._local_rate_limits.get(resource, (100, 0.0))
+            should_wait = remain < threshold and reset > time.time()
+            wait = (reset - time.time() + 1.0) if should_wait else 0.0
 
         if should_wait:
             self._log.warning(
-                "Rate limit low (%d remaining), waiting %.1fs until reset",
-                self._local_rate_limit_remain,
-                wait,
+                "Rate limit low (%s: %d remaining), waiting %.1fs until reset",
+                resource, remain, wait,
             )
             time.sleep(wait)
 
     def _update_rate_limit(self, resp: httpx.Response) -> None:
-        """Parse X-RateLimit-Remaining and X-RateLimit-Reset response headers."""
+        """Parse X-RateLimit-* response headers, keyed by resource type.
+
+        GitHub returns separate rate limit budgets for different API resources
+        (core, code_search, etc.) via the ``X-RateLimit-Resource`` header.
+        We track each independently to avoid code_search's low limit (10/min)
+        from blocking unrelated core API calls (5000/hr).
+        """
         remain_str = resp.headers.get("x-ratelimit-remaining", "")
         reset_str = resp.headers.get("x-ratelimit-reset", "")
+        resource = resp.headers.get("x-ratelimit-resource", "core")
 
         if not remain_str and not reset_str:
             return
@@ -440,14 +470,16 @@ class GitHubClient:
             key = _token_key(self._token)
             state = self._tracker.get_or_create(key)
             with state.lock:
-                if remain >= 0:
-                    state.rate_limit_remain = remain
-                if reset:
-                    state.rate_limit_reset = reset
+                old_remain, old_reset = state.rate_limits.get(resource, (100, 0.0))
+                state.rate_limits[resource] = (
+                    remain if remain >= 0 else old_remain,
+                    reset if reset else old_reset,
+                )
             return
 
         with self._local_lock:
-            if remain >= 0:
-                self._local_rate_limit_remain = remain
-            if reset:
-                self._local_rate_limit_reset = reset
+            old_remain, old_reset = self._local_rate_limits.get(resource, (100, 0.0))
+            self._local_rate_limits[resource] = (
+                remain if remain >= 0 else old_remain,
+                reset if reset else old_reset,
+            )
