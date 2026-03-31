@@ -37,6 +37,8 @@ class CachedIndicator:
 class CachedRepo:
     pushed_at: str
     scanned_at: str
+    repo_visibility: str = ""
+    repo_language: str = ""
     indicators: list[CachedIndicator] = field(default_factory=list)
 
 
@@ -61,7 +63,12 @@ def _cache_data_from_rows(rows: list[ScanRow]) -> CacheData:
         if r.scan_timestamp != latest.get(key):
             continue
         if key not in data:
-            data[key] = CachedRepo(pushed_at=r.repo_pushed_at, scanned_at=r.scan_timestamp)
+            data[key] = CachedRepo(
+                pushed_at=r.repo_pushed_at,
+                scanned_at=r.scan_timestamp,
+                repo_visibility=r.repo_visibility,
+                repo_language=r.repo_language,
+            )
         data[key].indicators.append(CachedIndicator(
             category=r.category,
             indicator=r.indicator,
@@ -86,8 +93,8 @@ def _cache_data_to_rows(data: CacheData) -> list[ScanRow]:
                 scan_timestamp=ind.scanned_at,
                 org=org,
                 repo=repo,
-                repo_visibility="",
-                repo_language="",
+                repo_visibility=cached.repo_visibility,
+                repo_language=cached.repo_language,
                 repo_pushed_at=cached.pushed_at,
                 category=ind.category,
                 indicator=ind.indicator,

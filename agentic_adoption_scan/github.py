@@ -306,6 +306,22 @@ class GitHubClient:
         self._log.info("Found %d repos in %s", len(repos), org)
         return repos
 
+    def get_repo(self, owner: str, repo: str) -> Repo:
+        """Fetch a single repo by owner/name. Raises RuntimeError if not found."""
+        import json as _json
+
+        self._log.debug("Fetching repo: %s/%s", owner, repo)
+        body, _ = self.api("GET", f"/repos/{owner}/{repo}")
+        item = _json.loads(body)
+        return Repo(
+            name=item.get("name", ""),
+            full_name=item.get("full_name", ""),
+            archived=bool(item.get("archived", False)),
+            visibility=item.get("visibility", ""),
+            language=item.get("language") or "",
+            pushed_at=item.get("pushed_at") or "",
+        )
+
     def check_path_exists(self, owner: str, repo: str, path: str) -> tuple[bool, bool]:
         """Check if a path exists in a repo. Returns (exists, is_dir)."""
         self._log.debug("Checking path: %s/%s/%s", owner, repo, path)
@@ -372,35 +388,37 @@ class GitHubClient:
     # ------------------------------------------------------------------
 
     def _throttle_search(self) -> None:
-        """Enforce the code search rate limit (≥2100 ms between calls)."""
+        """Enforce the code search rate limit (≥2100 ms between calls).
+
+        Uses an atomic check-and-set pattern: the lock is held while reading
+        the last-call timestamp AND updating it, so no two threads can both
+        read a stale value and skip the wait.  The sleep itself happens outside
+        the lock so other users are not blocked.
+        """
         if self._tracker is not None:
             key = _token_key(self._token)
             state = self._tracker.get_or_create(key)
 
-            # Read state under per-user lock, sleep OUTSIDE the lock
             with state.lock:
                 elapsed = time.monotonic() - state.search_last_call
+                wait = max(0, _SEARCH_MIN_DELAY - elapsed)
+                # Claim the slot now so concurrent threads see the updated time
+                state.search_last_call = time.monotonic() + wait
 
-            if elapsed < _SEARCH_MIN_DELAY:
-                wait = _SEARCH_MIN_DELAY - elapsed
+            if wait > 0:
                 self._log.debug("Throttling search: waiting %.3fs", wait)
                 time.sleep(wait)
-
-            with state.lock:
-                state.search_last_call = time.monotonic()
             return
 
         # Local fallback
         with self._local_lock:
             elapsed = time.monotonic() - self._local_search_last_call
+            wait = max(0, _SEARCH_MIN_DELAY - elapsed)
+            self._local_search_last_call = time.monotonic() + wait
 
-        if elapsed < _SEARCH_MIN_DELAY:
-            wait = _SEARCH_MIN_DELAY - elapsed
+        if wait > 0:
             self._log.debug("Throttling search: waiting %.3fs", wait)
             time.sleep(wait)
-
-        with self._local_lock:
-            self._local_search_last_call = time.monotonic()
 
     def _wait_for_rate_limit(self, resource: str = "core") -> None:
         """Sleep until the rate limit resets if remaining requests are low."""
@@ -414,7 +432,7 @@ class GitHubClient:
             with state.lock:
                 remain, reset = state.rate_limits.get(resource, (100, 0.0))
                 should_wait = remain < threshold and reset > time.time()
-                wait = (reset - time.time() + 1.0) if should_wait else 0.0
+                wait = max(0, reset - time.time() + 1.0) if should_wait else 0.0
 
             if should_wait:
                 self._log.warning(
@@ -428,7 +446,7 @@ class GitHubClient:
         with self._local_lock:
             remain, reset = self._local_rate_limits.get(resource, (100, 0.0))
             should_wait = remain < threshold and reset > time.time()
-            wait = (reset - time.time() + 1.0) if should_wait else 0.0
+            wait = max(0, reset - time.time() + 1.0) if should_wait else 0.0
 
         if should_wait:
             self._log.warning(

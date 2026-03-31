@@ -78,10 +78,18 @@ def _extract_github_token(ctx: Optional[Context]) -> str:
        OAuth token via ``posit-sdk`` (Connect deployments with viewer OAuth)
     3. Empty string (falls through to env-var lookup in GitHubClient)
     """
-    if ctx is None or ctx._request_context is None:
+    if ctx is None:
         return ""
 
-    request = getattr(ctx._request_context, "request", None)
+    # Access the RequestContext via the public .request_context property.
+    # The .request field on RequestContext holds the Starlette Request for
+    # HTTP transports (None for stdio).  We use getattr defensively since
+    # the mcp SDK could restructure internals across versions.
+    req_ctx = getattr(ctx, "request_context", None)
+    if req_ctx is None:
+        return ""
+
+    request = getattr(req_ctx, "request", None)
     if request is None:
         return ""
 
@@ -253,11 +261,13 @@ async def inspect_repo(
             force=True,
         )
 
-        # Find the target repo in the org
-        repos = client.list_org_repos(org)
-        target_repo = next((r for r in repos if r.name == repo), None)
-        if target_repo is None:
-            raise ValueError(f"repo {repo} not found in org {org}")
+        # Fetch the target repo directly (avoids listing the entire org)
+        try:
+            target_repo = client.get_repo(org, repo)
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                raise ValueError(f"repo {repo} not found in org {org}") from exc
+            raise
 
         now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         scan_results = scanner._scan_repo(target_repo, now)

@@ -225,7 +225,25 @@ def summarize_content(category: str, indicator: str, content: str) -> str:
 
 
 def _summarize_mcp(content: str) -> str:
-    """Extract server names from JSON keys in an MCP config."""
+    """Extract server names from an MCP config.
+
+    Tries JSON parsing first to accurately extract keys from ``mcpServers``
+    or ``servers``.  Falls back to naive line-based extraction on parse failure.
+    """
+    import json as _json
+
+    # Try structured JSON parsing first
+    try:
+        data = _json.loads(content)
+        if isinstance(data, dict):
+            for key in ("mcpServers", "servers"):
+                section = data.get(key)
+                if isinstance(section, dict) and section:
+                    return "servers: " + ", ".join(section.keys())
+    except (ValueError, TypeError):
+        pass
+
+    # Fallback: line-based extraction for non-JSON or malformed content
     servers: list[str] = []
     for line in content.splitlines():
         trimmed = line.strip()
