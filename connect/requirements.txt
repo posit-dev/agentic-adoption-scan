@@ -1,1 +1,1 @@
-agentic-adoption-scan
+agentic-adoption-scan[connect]
