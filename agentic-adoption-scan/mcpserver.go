@@ -415,6 +415,10 @@ func makeAdoptionSummaryHandler(cfg MCPServerConfig) server.ToolHandlerFunc {
 			topRepos = topRepos[:20]
 		}
 
+		if totalRepos == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf("no cached scan data for org %s — run scan_org first", org)), nil
+		}
+
 		reposWithAny := len(repoIndicators)
 
 		return marshalToolResult(adoptionSummary{
