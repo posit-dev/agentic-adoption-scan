@@ -1,1 +1,1 @@
-agentic-adoption-scan[connect] @ git+https://github.com/posit-dev/agentic-adoption-scan.git@main
+agentic-adoption-scan[connect] @ git+https://github.com/posit-dev/agentic-adoption-scan.git@replace-gh-cli-with-direct-http
