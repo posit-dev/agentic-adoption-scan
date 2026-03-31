@@ -8,9 +8,11 @@ Local testing:
     fastmcp run agentic_adoption_scan/server.py
 
 GitHub authentication:
-    Per-request Bearer token is accepted as an optional ``github_token``
-    parameter on tools that make GitHub API calls.  Set the ``GITHUB_TOKEN``
-    environment variable as a fallback (used when no token is passed).
+    On HTTP transports the server extracts the GitHub token from:
+    1. ``Authorization: Bearer <token>`` header (standalone deployments)
+    2. ``Posit-Connect-User-Session-Token`` header → exchanged for a
+       GitHub OAuth token via ``posit-sdk`` (Connect deployments)
+    3. ``GH_TOKEN`` / ``GITHUB_TOKEN`` env var (fallback for stdio)
 
 Configuration:
     CACHE_DIR  – directory for scan-state cache (default: .agentic-scan-cache)
@@ -27,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Context
 
 from agentic_adoption_scan.cache import Cache
 from agentic_adoption_scan.config import load_config, resolve_indicators
@@ -66,13 +69,66 @@ def _resolve_indicators_from_config(config_path: str):
     return resolve_indicators(None)
 
 
-def _make_github_client(github_token: Optional[str]) -> GitHubClient:
-    """Create a GitHubClient using *github_token* (or env-var fallback)."""
-    if github_token:
-        client = GitHubClient(token=github_token, tracker=_rate_limit_tracker)
-    else:
-        client = GitHubClient.from_env()
-        client._tracker = _rate_limit_tracker
+def _extract_github_token(ctx: Optional[Context]) -> str:
+    """Extract a GitHub token from the MCP request context.
+
+    Tries, in order:
+    1. ``Authorization: Bearer <token>`` header (standalone HTTP deployments)
+    2. ``Posit-Connect-User-Session-Token`` header → exchanged for a GitHub
+       OAuth token via ``posit-sdk`` (Connect deployments with viewer OAuth)
+    3. Empty string (falls through to env-var lookup in GitHubClient)
+    """
+    if ctx is None or ctx._request_context is None:
+        return ""
+
+    request = getattr(ctx._request_context, "request", None)
+    if request is None:
+        return ""
+
+    headers = getattr(request, "headers", {})
+
+    # 1. Direct Bearer token (standalone HTTP)
+    auth = headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token:
+            return token
+
+    # 2. Connect credential exchange
+    session_token = headers.get("posit-connect-user-session-token", "")
+    if session_token:
+        return _exchange_connect_token(session_token)
+
+    return ""
+
+
+def _exchange_connect_token(session_token: str) -> str:
+    """Exchange a Posit Connect user session token for a GitHub OAuth token.
+
+    Requires the ``posit-sdk`` package and a GitHub viewer OAuth integration
+    configured in Connect.  Returns empty string on failure.
+    """
+    try:
+        from posit import connect  # type: ignore[import-untyped]
+
+        client = connect.Client()
+        credentials = client.oauth.get_credentials(session_token)
+        return credentials.get("access_token", "")
+    except ImportError:
+        logger.debug("posit-sdk not installed; skipping Connect credential exchange")
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Connect credential exchange failed: %s", exc)
+        return ""
+
+
+def _make_github_client(ctx: Optional[Context] = None) -> GitHubClient:
+    """Create a GitHubClient from the request context (or env-var fallback)."""
+    token = _extract_github_token(ctx)
+    if token:
+        return GitHubClient(token=token, tracker=_rate_limit_tracker)
+    client = GitHubClient.from_env()
+    client._tracker = _rate_limit_tracker
     return client
 
 
@@ -104,7 +160,7 @@ async def scan_org(
     include_archived: bool = False,
     force: bool = False,
     found_only: bool = True,
-    github_token: str = "",
+    ctx: Context = None,
 ) -> str:
     """Scan a GitHub organization for agentic coding adoption indicators.
 
@@ -113,7 +169,7 @@ async def scan_org(
     """
 
     def _run():
-        client = _make_github_client(github_token or None)
+        client = _make_github_client(ctx)
         cache = _load_cache_safe(CACHE_DIR)
         indicators = _resolve_indicators_from_config(CONFIG_PATH)
         cutoff = datetime.now(tz=timezone.utc)
@@ -176,7 +232,7 @@ async def scan_org(
 async def inspect_repo(
     org: str,
     repo: str,
-    github_token: str = "",
+    ctx: Context = None,
 ) -> str:
     """Deeply inspect the content of agentic coding indicator files found in a specific repo.
 
@@ -184,7 +240,7 @@ async def inspect_repo(
     """
 
     def _run():
-        client = _make_github_client(github_token or None)
+        client = _make_github_client(ctx)
         indicators = _resolve_indicators_from_config(CONFIG_PATH)
         cache = _load_cache_safe(CACHE_DIR)
 
