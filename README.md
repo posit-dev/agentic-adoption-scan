@@ -15,6 +15,7 @@ graph TB
     subgraph clients["MCP Clients"]
         CC["Claude Code<br/>(CLI)"]
         CD["Claude Desktop"]
+        PA["Posit Assistant"]
         VS["VS Code + Copilot Chat"]
         Other["Any MCP Client"]
     end
@@ -43,6 +44,7 @@ graph TB
 
     CC -->|"stdio"| STDIO
     CD -->|"HTTP + OAuth"| OAUTH
+    PA -->|"HTTP + OAuth"| OAUTH
     VS -->|"HTTP + OAuth"| OAUTH
     Other -->|"HTTP + Bearer token"| APP
 
