@@ -8,6 +8,62 @@ Tools for measuring and tracking engineering effectiveness, with a focus on agen
 
 A CLI tool and MCP server that scans all repositories in a GitHub organization to detect adoption of agentic coding tools (Claude Code, GitHub Copilot, Cursor, MCP servers, evals frameworks, and more). Produces tidy-format CSV or Parquet data suitable for analysis and visualization.
 
+### Architecture
+
+```mermaid
+graph TB
+    subgraph clients["MCP Clients"]
+        CC["Claude Code<br/>(CLI)"]
+        CD["Claude Desktop"]
+        VS["VS Code + Copilot Chat"]
+        Other["Any MCP Client"]
+    end
+
+    subgraph local["Local (stdio)"]
+        direction LR
+        STDIO["agentic-adoption-scan serve<br/>(stdio transport)"]
+    end
+
+    subgraph connect["Posit Connect (HTTP)"]
+        direction TB
+        OAUTH["Connect OAuth 2.1<br/>(DCR + PKCE + RFC 9728)"]
+        APP["agentic-adoption-scan<br/>(Streamable HTTP transport)"]
+        CRED["Credential Exchange<br/>(posit-sdk)"]
+        OAUTH --> APP
+        APP --> CRED
+    end
+
+    subgraph core["Scanner Core"]
+        GH_CLIENT["GitHub API Client<br/>(httpx + per-user rate limiting)"]
+        SCANNER["Scanner<br/>(22+ indicators across 7 categories)"]
+        CACHE["Parquet Cache<br/>(local filesystem or S3)"]
+        SCANNER --> GH_CLIENT
+        SCANNER --> CACHE
+    end
+
+    CC -->|"stdio"| STDIO
+    CD -->|"HTTP + OAuth"| OAUTH
+    VS -->|"HTTP + OAuth"| OAUTH
+    Other -->|"HTTP + Bearer token"| APP
+
+    STDIO --> SCANNER
+    APP --> SCANNER
+    CRED -->|"GitHub OAuth token"| GH_CLIENT
+    GH_CLIENT -->|"REST API"| GITHUB["GitHub API<br/>(repos, contents, code search)"]
+
+    style clients fill:#f0f4ff,stroke:#4a6fa5
+    style connect fill:#fff4e6,stroke:#d4930d
+    style local fill:#e8f5e9,stroke:#2e7d32
+    style core fill:#fce4ec,stroke:#c62828
+```
+
+**Two deployment modes:**
+
+- **Local (stdio):** Claude Code launches the server as a subprocess. Authentication uses your local `GH_TOKEN` / `GITHUB_TOKEN` environment variable. No network server needed.
+- **Posit Connect (HTTP):** The server runs as an ASGI app behind Connect's OAuth 2.1 layer. Each user authenticates through Connect, and their GitHub token is obtained via Connect's credential exchange API — no shared tokens.
+
+Both modes use the same scanner core: the GitHub API client, indicator matching, and Parquet cache.
+
 ### Install
 
 ```bash
