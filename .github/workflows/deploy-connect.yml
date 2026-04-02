@@ -31,7 +31,7 @@ jobs:
       - name: Deploy to Connect
         working-directory: connect
         env:
-          CONNECT_SERVER: https://connect.posit.it
+          CONNECT_SERVER: ${{ secrets.CONNECT_SERVER }}
           CONNECT_API_KEY: ${{ secrets.CONNECT_API_KEY }}
         run: |
           rsconnect deploy fastapi \
