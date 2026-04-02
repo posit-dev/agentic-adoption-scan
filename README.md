@@ -115,9 +115,13 @@ Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_su
 
 #### Per-user authentication (HTTP transport)
 
-When running over the HTTP transport (`serve --transport http`), the server supports per-user GitHub tokens. MCP tools accept an optional `github_token` parameter, and the server also reads `Authorization: Bearer` headers when available.
+When running over the HTTP transport (`serve --transport http`), the server supports per-user GitHub tokens. The token is extracted transparently from the request — no tool parameter is needed. The server reads, in order:
 
-This enables multi-user deployments where each user authenticates with their own GitHub credentials. If no token is provided, the server falls back to `GH_TOKEN`/`GITHUB_TOKEN` from the environment.
+1. `Authorization: Bearer <token>` header (standalone HTTP deployments)
+2. `Posit-Connect-User-Session-Token` header, exchanged for a GitHub OAuth token via `posit-sdk` (Connect deployments with viewer OAuth)
+3. `GH_TOKEN` / `GITHUB_TOKEN` environment variable (fallback for stdio or unauthenticated requests)
+
+This enables multi-user deployments where each user authenticates with their own GitHub credentials without any changes to tool calls.
 
 ### Deploying to Posit Connect
 
@@ -140,7 +144,7 @@ GITHUB_TOKEN=<your-github-pat>
 
 ```bash
 cd connect/
-rsconnect write-manifest fastapi --overwrite --entrypoint server:mcp .
+rsconnect write-manifest fastapi --overwrite --entrypoint server:app .
 ```
 
 #### 3. Deploy
@@ -149,7 +153,7 @@ rsconnect write-manifest fastapi --overwrite --entrypoint server:mcp .
 rsconnect deploy fastapi \
   --server https://your-connect-server.example.com \
   --api-key YOUR_API_KEY \
-  --entrypoint server:mcp \
+  --entrypoint server:app \
   --title "agentic-adoption-scan" \
   .
 ```
@@ -196,7 +200,7 @@ Releases are fully automated via [python-semantic-release](https://python-semant
 | `feat!:` / `BREAKING CHANGE:` | major — `0.2.0` → `1.0.0` |
 | `chore:`, `docs:`, `refactor:`, etc. | no release |
 
-On every merge to `main`, semantic-release analyzes commits since the last tag. If there are releasable changes, it creates a `CHANGELOG.md` entry, commits it, tags the new version (e.g. `v0.2.0`), and publishes a GitHub release.
+On every merge to `main`, semantic-release analyzes commits since the last tag. If there are releasable changes, it creates a `CHANGELOG.md` entry, commits it, tags the new version (e.g. `v0.2.0`), and publishes a GitHub release. The new tag then triggers the `publish.yml` workflow, which builds the package and publishes it to PyPI.
 
 ### One-time setup required
 

@@ -135,9 +135,7 @@ def _make_github_client(ctx: Optional[Context] = None) -> GitHubClient:
     token = _extract_github_token(ctx)
     if token:
         return GitHubClient(token=token, tracker=_rate_limit_tracker)
-    client = GitHubClient.from_env()
-    client._tracker = _rate_limit_tracker
-    return client
+    return GitHubClient.from_env(tracker=_rate_limit_tracker)
 
 
 def _load_cache_safe(cache_dir: str) -> Cache:

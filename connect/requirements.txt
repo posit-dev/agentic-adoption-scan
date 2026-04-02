@@ -1,1 +1,4 @@
+# Pinned to @main intentionally: the Connect deploy workflow runs on every merge
+# to main, so the deployed version always matches the current state of the branch.
+# Reproducibility is handled by the deploy process itself, not by a pinned hash.
 agentic-adoption-scan[connect] @ git+https://github.com/posit-dev/agentic-adoption-scan.git@main

@@ -188,10 +188,14 @@ class GitHubClient:
         self._local_search_last_call: float = 0.0
 
     @classmethod
-    def from_env(cls, log: Optional[logging.Logger] = None) -> "GitHubClient":
+    def from_env(
+        cls,
+        log: Optional[logging.Logger] = None,
+        tracker: Optional[RateLimitTracker] = None,
+    ) -> "GitHubClient":
         """Create a client by reading GH_TOKEN then GITHUB_TOKEN from the environment."""
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-        return cls(token=token, log=log)
+        return cls(token=token, log=log, tracker=tracker)
 
     # ------------------------------------------------------------------
     # Core HTTP

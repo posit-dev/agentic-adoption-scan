@@ -134,15 +134,17 @@ def scan(
     unique_repos = len({r.repo for r in results})
 
     # Write output
-    if output and output.endswith(".parquet"):
+    use_parquet = output_format == "parquet" or (output and output.endswith(".parquet"))
+    if use_parquet:
         try:
             import os as _os
             import posixpath
 
             from agentic_adoption_scan.storage import LocalStore
 
-            _dir = _os.path.dirname(_os.path.abspath(output))
-            _base = _os.path.splitext(_os.path.basename(output))[0]
+            _out = output or "scan-results.parquet"
+            _dir = _os.path.dirname(_os.path.abspath(_out))
+            _base = _os.path.splitext(_os.path.basename(_out))[0]
             _store = LocalStore()
             write_scan_parquet(_store, posixpath.join(_dir, _base), results)
         except Exception as exc:  # noqa: BLE001
@@ -214,15 +216,17 @@ def inspect(
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    if output and output.endswith(".parquet"):
+    use_parquet = output_format == "parquet" or (output and output.endswith(".parquet"))
+    if use_parquet:
         try:
             import os as _os
             import posixpath
 
             from agentic_adoption_scan.storage import LocalStore
 
-            _dir = _os.path.dirname(_os.path.abspath(output))
-            _base = _os.path.splitext(_os.path.basename(output))[0]
+            _out = output or "inspect-results.parquet"
+            _dir = _os.path.dirname(_os.path.abspath(_out))
+            _base = _os.path.splitext(_os.path.basename(_out))[0]
             _store = LocalStore()
             write_inspect_parquet(_store, posixpath.join(_dir, _base), results)
         except Exception as exc:  # noqa: BLE001

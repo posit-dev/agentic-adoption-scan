@@ -1,8 +1,2 @@
 {
-  "mcpServers": {
-    "agentic-adoption-scan": {
-      "command": "uv",
-      "args": ["--directory", "/Users/ianfloressiaca/agentic-adoption-scan", "run", "agentic-adoption-scan", "serve"]
-    }
-  }
 }
