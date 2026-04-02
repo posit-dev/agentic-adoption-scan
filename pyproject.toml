@@ -11,6 +11,7 @@ license = {file = "LICENSE.md"}
 requires-python = ">=3.11"
 authors = [
     {name = "Elliot Murphy", email = "elliot.murphy@posit.co"},
+    {name = "Ian Flores Siaca", email = "iflores.siaca@posit.co"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
