@@ -26,4 +26,8 @@ mcp.settings.transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=False,
 )
 
+# Enable stateless mode — Connect load-balances across multiple processes,
+# so session state cannot be pinned to a single process.
+mcp.settings.stateless_http = True
+
 app = mcp.streamable_http_app()
