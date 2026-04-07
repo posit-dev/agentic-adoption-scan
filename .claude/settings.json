@@ -1,15 +1,2 @@
 {
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/scripts/setup-gh.sh",
-            "timeout": 120
-          }
-        ]
-      }
-    ]
-  }
 }

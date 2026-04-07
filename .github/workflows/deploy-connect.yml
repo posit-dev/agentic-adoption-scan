@@ -1,0 +1,42 @@
+name: Deploy to Connect
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'agentic_adoption_scan/**'
+      - 'connect/**'
+      - 'pyproject.toml'
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Posit Connect
+    runs-on: ubuntu-latest
+    # Skip the version-bump commit from semantic-release
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install rsconnect-python
+        run: pip install rsconnect-python
+
+      - name: Deploy to Connect
+        working-directory: connect
+        env:
+          CONNECT_SERVER: ${{ secrets.CONNECT_SERVER }}
+          CONNECT_API_KEY: ${{ secrets.CONNECT_API_KEY }}
+        run: |
+          rsconnect deploy fastapi \
+            --server "$CONNECT_SERVER" \
+            --api-key "$CONNECT_API_KEY" \
+            --entrypoint server:app \
+            --title "agentic-adoption-scan" \
+            .
