@@ -6,35 +6,87 @@ Tools for measuring and tracking engineering effectiveness, with a focus on agen
 
 ## agentic-adoption-scan
 
-A CLI tool that scans all repositories in a GitHub organization to detect adoption of agentic coding tools (Claude Code, GitHub Copilot, Cursor, MCP servers, evals frameworks, and more). Produces tidy-format CSV data suitable for analysis and visualization.
+A CLI tool and MCP server that scans all repositories in a GitHub organization to detect adoption of agentic coding tools (Claude Code, GitHub Copilot, Cursor, MCP servers, evals frameworks, and more). Produces tidy-format CSV or Parquet data suitable for analysis and visualization.
+
+### Architecture
+
+```mermaid
+graph TB
+    subgraph clients["MCP Clients"]
+        CC["Claude Code<br/>(CLI)"]
+        CD["Claude Desktop"]
+        PA["Posit Assistant"]
+        VS["VS Code + Copilot Chat"]
+        Other["Any MCP Client"]
+    end
+
+    subgraph local["Local (stdio)"]
+        direction LR
+        STDIO["agentic-adoption-scan serve<br/>(stdio transport)"]
+    end
+
+    subgraph connect["Posit Connect (HTTP)"]
+        direction TB
+        OAUTH["Connect OAuth 2.1<br/>(DCR + PKCE + RFC 9728)"]
+        APP["agentic-adoption-scan<br/>(Streamable HTTP transport)"]
+        CRED["Credential Exchange<br/>(posit-sdk)"]
+        OAUTH --> APP
+        APP --> CRED
+    end
+
+    subgraph core["Scanner Core"]
+        GH_CLIENT["GitHub API Client<br/>(httpx + per-user rate limiting)"]
+        SCANNER["Scanner<br/>(22+ indicators across 7 categories)"]
+        CACHE["Parquet Cache<br/>(local filesystem or S3)"]
+        SCANNER --> GH_CLIENT
+        SCANNER --> CACHE
+    end
+
+    CC -->|"stdio"| STDIO
+    CD -->|"HTTP + OAuth"| OAUTH
+    PA -->|"HTTP + OAuth"| OAUTH
+    VS -->|"HTTP + OAuth"| OAUTH
+    Other -->|"HTTP + Bearer token"| APP
+
+    STDIO --> SCANNER
+    APP --> SCANNER
+    CRED -->|"GitHub OAuth token"| GH_CLIENT
+    GH_CLIENT -->|"REST API"| GITHUB["GitHub API<br/>(repos, contents, code search)"]
+
+    style clients fill:#f0f4ff,stroke:#4a6fa5
+    style connect fill:#fff4e6,stroke:#d4930d
+    style local fill:#e8f5e9,stroke:#2e7d32
+    style core fill:#fce4ec,stroke:#c62828
+```
+
+**Two deployment modes:**
+
+- **Local (stdio):** Claude Code launches the server as a subprocess. Authentication uses your local `GH_TOKEN` / `GITHUB_TOKEN` environment variable. No network server needed.
+- **Posit Connect (HTTP):** The server runs as an ASGI app behind Connect's OAuth 2.1 layer. Each user authenticates through Connect, and their GitHub token is obtained via Connect's credential exchange API — no shared tokens.
+
+Both modes use the same scanner core: the GitHub API client, indicator matching, and Parquet cache.
 
 ### Install
 
-**macOS** (Intel and Apple Silicon):
-
 ```bash
-curl -fsSL "https://github.com/posit-dev/eng-effectiveness-metrics-tools/releases/latest/download/agentic-adoption-scan_darwin_$(uname -m | sed 's/x86_64/amd64/').tar.gz" | tar -xz && sudo mv agentic-adoption-scan /usr/local/bin/
+pip install agentic-adoption-scan
 ```
 
-**Linux** (x86\_64 and arm64):
+Or with S3 cache support:
 
 ```bash
-curl -fsSL "https://github.com/posit-dev/eng-effectiveness-metrics-tools/releases/latest/download/agentic-adoption-scan_linux_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar -xz && sudo mv agentic-adoption-scan /usr/local/bin/
-```
-
-**Via pip/pipx** (macOS, Linux, Windows):
-
-```bash
-pipx install agentic-adoption-scan
+pip install "agentic-adoption-scan[s3]"
 ```
 
 ### Prerequisites
 
-The tool uses the `gh` CLI for GitHub authentication. Make sure you have it installed and authenticated:
+The tool requires a GitHub personal access token (PAT) for API access. Set it as an environment variable:
 
 ```bash
-gh auth login
+export GITHUB_TOKEN=<your-github-pat>
 ```
+
+The token needs `repo` scope (or fine-grained equivalent) to read repository contents and code search results. You can also use `GH_TOKEN` (checked first) as an alternative environment variable name.
 
 ### Usage
 
@@ -67,11 +119,12 @@ agentic-adoption-scan serve
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--org` | (required) | GitHub organization to scan |
-| `--output` | stdout | Output CSV file path |
+| `--output` | stdout | Output file path |
+| `--format` | csv | Output format: `csv` or `parquet` |
 | `--days` | 90 | Only include repos active in the last N days |
 | `--include-archived` | false | Include archived repos |
 | `--force` | false | Bypass cache and rescan everything |
-| `--cache-dir` | `.agentic-scan-cache` | Directory for scan state cache |
+| `--cache-dir` | `.agentic-scan-cache` | Directory (or `s3://` URL) for scan state cache |
 | `--config` | | Path to custom indicators YAML config |
 | `--verbose` | false | Enable verbose logging |
 
@@ -118,14 +171,23 @@ The tool can run as an MCP server, exposing tools for use directly within Claude
 
 Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_summary`, `get_adoption_summary`.
 
+#### Per-user authentication (HTTP transport)
+
+When running over the HTTP transport (`serve --transport http`), the server supports per-user GitHub tokens. The token is extracted transparently from the request — no tool parameter is needed. The server reads, in order:
+
+1. `Authorization: Bearer <token>` header (standalone HTTP deployments)
+2. `Posit-Connect-User-Session-Token` header, exchanged for a GitHub OAuth token via `posit-sdk` (Connect deployments with viewer OAuth)
+3. `GH_TOKEN` / `GITHUB_TOKEN` environment variable (fallback for stdio or unauthenticated requests)
+
+This enables multi-user deployments where each user authenticates with their own GitHub credentials without any changes to tool calls.
+
 ### Deploying to Posit Connect
 
-You can deploy the MCP server to [Posit Connect](https://docs.posit.co/connect/user/mcp-servers/) so that AI clients across your organization can access it without running anything locally. The `connect/` directory contains a Python entry point that wraps the binary for Connect's ASGI runtime.
+You can deploy the MCP server to [Posit Connect](https://docs.posit.co/connect/user/mcp-servers/) so that AI clients across your organization can access it without running anything locally. The `connect/` directory contains the ASGI entrypoint for Connect's runtime.
 
 #### Prerequisites
 
 - [rsconnect-python](https://docs.posit.co/rsconnect-python/) installed: `pip install rsconnect-python`
-- The `gh` CLI installed and available in `PATH` on the Connect server (the binary uses it for GitHub API calls)
 - A Posit Connect server URL and API key
 
 #### 1. Set environment variables
@@ -136,16 +198,12 @@ In your Connect content's **Vars** settings (or pass via `--environment` at depl
 GITHUB_TOKEN=<your-github-pat>
 ```
 
-The `gh` CLI reads `GITHUB_TOKEN` automatically, so no interactive `gh auth login` is needed on the server.
-
 #### 2. Write the manifest
 
 ```bash
 cd connect/
-rsconnect write-manifest fastapi --overwrite --entrypoint server:mcp .
+rsconnect write-manifest fastapi --overwrite --entrypoint server:app .
 ```
-
-This creates `connect/manifest.json` (and `connect/requirements.txt` if not already present) for later or CI-driven deployments.
 
 #### 3. Deploy
 
@@ -153,17 +211,7 @@ This creates `connect/manifest.json` (and `connect/requirements.txt` if not alre
 rsconnect deploy fastapi \
   --server https://your-connect-server.example.com \
   --api-key YOUR_API_KEY \
-  --entrypoint server:mcp \
-  --title "agentic-adoption-scan" \
-  .
-```
-
-Or if you have already saved your server with `rsconnect add`:
-
-```bash
-rsconnect deploy fastapi \
-  --name your-server-nickname \
-  --entrypoint server:mcp \
+  --entrypoint server:app \
   --title "agentic-adoption-scan" \
   .
 ```
@@ -182,8 +230,6 @@ Once deployed, add the Connect-hosted MCP server to your Claude Code configurati
   }
 }
 ```
-
-Replace `<content-id>` with the numeric ID shown in the Connect dashboard for this content item.
 
 #### Performance tip
 
@@ -212,10 +258,7 @@ Releases are fully automated via [python-semantic-release](https://python-semant
 | `feat!:` / `BREAKING CHANGE:` | major — `0.2.0` → `1.0.0` |
 | `chore:`, `docs:`, `refactor:`, etc. | no release |
 
-On every merge to `main`, semantic-release analyzes commits since the last tag. If there are releasable changes, it creates a `CHANGELOG.md` entry, commits it, tags the new version (e.g. `v0.2.0`), and publishes a GitHub release — all in one step. That tag push then triggers the publish workflow, which:
-
-1. Builds native binaries for macOS (amd64/arm64) and Linux (amd64/arm64) via [GoReleaser](https://goreleaser.com/)
-2. Publishes Python wheels for all platforms to [PyPI](https://pypi.org/project/agentic-adoption-scan/) via [go-to-wheel](https://github.com/simonw/go-to-wheel)
+On every merge to `main`, semantic-release analyzes commits since the last tag. If there are releasable changes, it creates a `CHANGELOG.md` entry, commits it, tags the new version (e.g. `v0.2.0`), and publishes a GitHub release. The new tag then triggers the `publish.yml` workflow, which builds the package and publishes it to PyPI.
 
 ### One-time setup required
 
