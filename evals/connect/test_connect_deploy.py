@@ -1,6 +1,6 @@
 """Deployment smoke tests for the MCP server on Posit Connect.
 
-These tests prove that the Python MCP wrapper deploys successfully and that
+These tests prove that the Python MCP server deploys successfully and that
 each tool is reachable via the Streamable HTTP MCP transport.
 
 Requirements
@@ -8,8 +8,7 @@ Requirements
 - CONNECT_SERVER and CONNECT_API_KEY env vars (set by posit-dev/with-connect
   in CI, or manually for local runs)
 - rsconnect-python installed
-- The agentic-adoption-scan binary available in the connect/ directory or
-  installed via pipx/pip (the Connect deployment installs it from PyPI)
+- The agentic-adoption-scan Python package installed
 
 Run locally
 -----------

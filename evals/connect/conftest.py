@@ -7,12 +7,13 @@ or by the developer manually for local testing):
     CONNECT_SERVER   — e.g. http://localhost:3939
     CONNECT_API_KEY  — an administrator API key
 
-The fixture deploys the Python MCP wrapper once per test session and tears it
+The fixture deploys the Python MCP server once per test session and tears it
 down when the session ends. Individual tests receive the deployed content URL
 and a pre-configured httpx client.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -66,12 +67,13 @@ def deployed_content_url(connect_server: str, connect_api_key: str) -> str:
     Deployment runs once per test session. The content is removed in teardown
     so CI stays clean between runs.
     """
-    # Deploy using rsconnect-python
+    # Deploy using rsconnect-python — entrypoint is server:app (the Starlette
+    # ASGI app returned by mcp.streamable_http_app())
     _rsconnect(
         "deploy", "fastapi",
         "--server", connect_server,
         "--api-key", connect_api_key,
-        "--entrypoint", "server:mcp",
+        "--entrypoint", "server:app",
         "--title", _DEPLOYMENT_TITLE,
         "--new",                         # always create a new deployment
         str(_CONNECT_DIR),
@@ -86,7 +88,6 @@ def deployed_content_url(connect_server: str, connect_api_key: str) -> str:
         "--format", "json",
     )
 
-    import json
     items = json.loads(result.stdout)
     if not items:
         raise RuntimeError(

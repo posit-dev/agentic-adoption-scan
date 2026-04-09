@@ -10,33 +10,36 @@ evals/
 └── connect/          # Posit Connect deployment + smoke tests
 ```
 
-Unit and integration tests for the MCP handler functions live alongside the Go source code:
+Unit and handler tests for the Python MCP server live alongside the main test suite:
 
 ```
-agentic-adoption-scan/
-└── mcpserver_test.go  # Go handler-level tests (no GitHub token required)
+tests/
+├── test_server.py     # MCP handler-level tests (no GitHub token required)
+├── test_cache.py
+├── test_config.py
+├── test_indicators.py
+├── test_output.py
+└── test_scanner.py
 ```
 
 ---
 
-## Layer 1 — Go unit tests (`go test`)
+## Layer 1 — Python unit tests (`pytest`)
 
 **What:** Direct calls to each MCP tool handler function. No network, no LLM, no GitHub token.
 
 **Coverage:**
 - `list_indicators` returns valid JSON with all expected categories and indicator fields
-- Every handler returns `IsError=true` (not a transport error) when required params are missing
 - `get_repo_summary` / `get_adoption_summary` gracefully report a cache miss
-- `marshalToolResult` round-trips data correctly
-- `newMCPServer` can be instantiated
+- `_extract_github_token` correctly extracts Bearer tokens from request contexts
+- `_resolve_indicators_from_config` handles empty and missing config paths
 
 **Run:**
 ```bash
-cd agentic-adoption-scan
-go test -v -race ./...
+pytest tests/ -v
 ```
 
-**CI:** Runs in `pr-checks.yml` alongside `go vet` and the GoReleaser dry-run.
+**CI:** Runs in `pr-checks.yml` with `pytest tests/ -v`.
 
 ---
 
@@ -46,7 +49,7 @@ Inspect AI (from UK AISI) provides a composable eval framework built around Task
 
 ### 2a. Deterministic structure evals
 
-No LLM required. The solver calls the MCP binary directly via stdio and the scorer checks the response structure deterministically.
+No LLM required. The solver calls the Python `list_indicators` function directly and the scorer checks the response structure deterministically.
 
 | Task | What it checks |
 |---|---|
@@ -57,9 +60,7 @@ No LLM required. The solver calls the MCP binary directly via stdio and the scor
 ```bash
 cd evals/inspect
 pip install -e .
-
-# Build the binary first
-cd ../../agentic-adoption-scan && go build -o agentic-adoption-scan . && cd ../evals/inspect
+pip install -e ../../  # install the main package
 
 inspect eval mcp_eval_tasks.py --task list_indicators_structure
 inspect eval mcp_eval_tasks.py --task list_indicators_schema
@@ -85,7 +86,7 @@ inspect eval mcp_eval_tasks.py \
 
 Requires `ANTHROPIC_API_KEY` + `GITHUB_TOKEN`. An LLM agent answers an adoption question by calling the MCP tools; the answer is graded by a judge model.
 
-Skipped automatically when `GITHUB_TOKEN` is not set.
+Skipped automatically when `GITHUB_TOKEN` or `ANTHROPIC_API_KEY` is not set.
 
 | Task | What it checks |
 |---|---|
@@ -105,7 +106,7 @@ inspect eval mcp_eval_tasks.py \
 
 ## Layer 3 — Connect deployment tests (`evals/connect/`)
 
-These tests prove that the Python MCP wrapper deploys successfully to Posit Connect and that each MCP tool is reachable via the Streamable HTTP transport.
+These tests prove that the Python MCP server deploys successfully to Posit Connect and that each MCP tool is reachable via the Streamable HTTP transport.
 
 ### Architecture (following `posit-dev/with-connect`)
 
@@ -114,7 +115,7 @@ GitHub Actions
   └── posit-dev/with-connect@v1        ← starts Connect in Docker
         ├── bootstrap API key
         └── outputs: url, api-key
-  └── rsconnect deploy fastapi          ← deploy the Python wrapper
+  └── rsconnect deploy fastapi          ← deploy the Python server
   └── pytest evals/connect/ -m connect  ← smoke tests against deployed server
 ```
 
@@ -159,7 +160,7 @@ pytest evals/connect/ -v -m connect
 
 Adapted from the skill-eval / skillgrade dual-grader pattern and the VIP project's phased test approach:
 
-- **Layer 1 (Go):** Fast, zero dependencies, no API keys. Catches regressions in handler logic immediately. Every PR runs these.
+- **Layer 1 (Python unit tests):** Fast, zero external dependencies, no API keys. Catches regressions in handler logic immediately. Every PR runs these.
 - **Layer 2 (Inspect AI):** Catches semantic regressions that unit tests miss — e.g., an indicator category renamed or a field silently dropped. LLM-as-judge is used sparingly, only for quality assertions that are hard to express as deterministic checks.
 - **Layer 3 (Connect):** The only way to prove the full deployment stack works end-to-end. Following the VIP / with-connect pattern, a real (ephemeral) Connect server is used rather than a mock.
 
@@ -178,7 +179,7 @@ Both were evaluated:
 
 Every layer degrades gracefully when optional secrets are absent:
 - Layer 2 semantic tasks: skipped if `ANTHROPIC_API_KEY` not set
-- Layer 2 integration task: skipped if `GITHUB_TOKEN` not set
+- Layer 2 integration task: skipped if `GITHUB_TOKEN` or `ANTHROPIC_API_KEY` not set
 - Layer 3: entire job skipped if `CONNECT_LICENSE` not set
 
-This means the core Go tests always run for every PR, while richer evals run in repos that have the necessary credentials configured.
+This means the core Python tests always run for every PR, while richer evals run in repos that have the necessary credentials configured.

@@ -4,32 +4,25 @@ on:
   pull_request:
 
 jobs:
-  # ─── Layer 1 & 2: Inspect AI deterministic + semantic evals ──────────────
+  # ─── Layer 2: Inspect AI deterministic + semantic evals ──────────────────
   inspect-evals:
     name: Inspect AI evals
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agentic-adoption-scan/go.mod
-
-      # Build the binary so the evals can call it via subprocess
-      - name: Build agentic-adoption-scan
-        working-directory: agentic-adoption-scan
-        run: go build -o agentic-adoption-scan .
-
-      - name: Add binary to PATH
-        run: echo "${{ github.workspace }}/agentic-adoption-scan" >> $GITHUB_PATH
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install eval dependencies
-        working-directory: evals/inspect
-        run: pip install -e .
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      # Install the main package (needed by eval tasks) and eval dependencies
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[s3]"
+          uv pip install --system -e evals/inspect/
 
       # ── Deterministic structure evals (no API key needed) ─────────────────
       - name: Run list_indicators_structure eval

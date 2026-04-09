@@ -32,22 +32,17 @@ Usage
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from inspect_ai import Task, task
-from inspect_ai.dataset import Dataset, MemoryDataset, Sample, json_dataset
-from inspect_ai.model import ChatMessage, ChatMessageUser
+from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.scorer import (
     Score,
     Target,
     accuracy,
-    mean,
     model_graded_qa,
     scorer,
 )
@@ -61,99 +56,19 @@ from inspect_ai.solver import (
 )
 
 # ---------------------------------------------------------------------------
-# Helpers: call the MCP server via subprocess (stdio transport)
+# Helpers: call the MCP server via the Python module directly
 # ---------------------------------------------------------------------------
 
-_BINARY = "agentic-adoption-scan"
-_REPO_ROOT = Path(__file__).parent.parent.parent
+
+def _call_list_indicators() -> str:
+    """Call the list_indicators tool function and return the JSON string."""
+    from agentic_adoption_scan.server import list_indicators
+    return asyncio.run(list_indicators())
 
 
-def _find_binary() -> str:
-    """Locate the agentic-adoption-scan binary, preferring the local build."""
-    local = _REPO_ROOT / "agentic-adoption-scan" / "agentic-adoption-scan"
-    if local.exists():
-        return str(local)
-    found = shutil.which(_BINARY)
-    if found:
-        return found
-    raise FileNotFoundError(
-        f"Binary '{_BINARY}' not found. "
-        "Build it with: cd agentic-adoption-scan && go build ."
-    )
-
-
-def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Call an MCP tool via the stdio transport and return the parsed result.
-
-    Sends the MCP initialize + tools/call sequence to the binary's stdin,
-    then reads the JSON-RPC response stream.
-    """
-    binary = _find_binary()
-
-    # Build the MCP JSON-RPC message sequence
-    messages = [
-        {
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "inspect-eval", "version": "1.0"},
-            },
-            "id": 1,
-        },
-        {
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {},
-        },
-        {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
-            "id": 2,
-        },
-    ]
-    stdin_data = "\n".join(json.dumps(m) for m in messages) + "\n"
-
-    with tempfile.TemporaryDirectory() as cache_dir:
-        result = subprocess.run(
-            [binary, "serve", "--cache-dir", cache_dir],
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-    # Parse newline-delimited JSON-RPC responses, pick the one with id=2
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if msg.get("id") == 2:
-            if "error" in msg:
-                raise RuntimeError(f"MCP tool error: {msg['error']}")
-            return msg.get("result", {})
-
-    raise RuntimeError(
-        f"No response for tool {tool_name!r}.\n"
-        f"stdout: {result.stdout[:500]}\n"
-        f"stderr: {result.stderr[:500]}"
-    )
-
-
-def _get_tool_text(tool_name: str, arguments: dict[str, Any]) -> str:
-    """Return the text content from a successful tool call."""
-    result = _call_mcp_tool(tool_name, arguments)
-    content = result.get("content", [])
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            return item["text"]
-    raise RuntimeError(f"No text content in response from {tool_name!r}")
+def _get_indicators_json() -> dict[str, Any]:
+    """Return parsed JSON from list_indicators."""
+    return json.loads(_call_list_indicators())
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +135,7 @@ def call_list_indicators() -> Solver:
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         try:
-            text = _get_tool_text("list_indicators", {})
+            text = _call_list_indicators()
         except Exception as exc:
             state.output.completion = f"ERROR: {exc}"
             return state
@@ -284,8 +199,10 @@ def summarise_indicators() -> Solver:
 
     async def solve(state: TaskState, generate_fn: Generate) -> TaskState:
         # Embed the tool output into the context so the model can reason about it
+        from inspect_ai.model import ChatMessageUser
+
         try:
-            raw = _get_tool_text("list_indicators", {})
+            raw = _call_list_indicators()
         except Exception as exc:
             state.messages.append(
                 ChatMessageUser(content=f"list_indicators failed: {exc}")
@@ -429,7 +346,7 @@ def adoption_agent_eval() -> Task:
 @solver
 def _skip_solver() -> Solver:
     async def solve(state: TaskState, generate: Generate) -> TaskState:
-        state.output.completion = "SKIPPED: GITHUB_TOKEN not available"
+        state.output.completion = "SKIPPED: required secrets not available"
         return state
 
     return solve

@@ -1,13 +1,13 @@
 name: Connect Deployment Test
 
-# Proves that the Python MCP wrapper deploys to Posit Connect and each tool
+# Proves that the Python MCP server deploys to Posit Connect and each tool
 # is reachable via the Streamable HTTP MCP transport.
 #
 # Requires the CONNECT_LICENSE secret (base64-encoded .lic file) — set this
 # in the repo's Settings → Secrets and variables → Actions.
 #
 # The workflow uses posit-dev/with-connect to spin up an ephemeral Connect
-# container (Docker), deploys the wrapper with rsconnect-python, then runs
+# container (Docker), deploys the server with rsconnect-python, then runs
 # the pytest test suite in evals/connect/.
 
 on:
@@ -21,18 +21,8 @@ jobs:
     if: ${{ (vars.CONNECT_LICENSE_AVAILABLE == 'true' || github.repository_owner == 'posit-dev') && secrets.CONNECT_LICENSE != '' }}
 
     steps:
-      # ── Checkout & build ─────────────────────────────────────────────────
+      # ── Checkout ──────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: agentic-adoption-scan/go.mod
-
-      # Build the binary and place it next to the Python wrapper so that the
-      # Connect deployment picks it up during the deploy step.
-      - name: Build agentic-adoption-scan binary
-        working-directory: agentic-adoption-scan
-        run: go build -o ../connect/agentic-adoption-scan .
 
       # ── Start ephemeral Posit Connect ─────────────────────────────────────
       # posit-dev/with-connect pulls the official Connect Docker image, starts
@@ -49,15 +39,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install rsconnect-python and test deps
-        run: pip install rsconnect-python pytest httpx mcp
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
 
-      # Install the agentic-adoption-scan Python package so Connect can find
-      # the binary at runtime (the local binary copy is also present as a
-      # fallback for this test-only deployment).
+      - name: Install dependencies
+        run: |
+          uv pip install --system -e ".[s3]"
+          uv pip install --system rsconnect-python pytest httpx mcp
+
+      # Install the Connect wrapper dependencies (pulls in posit-sdk via
+      # the [connect] optional dependency for OAuth credential exchange)
       - name: Install connect wrapper dependencies
         working-directory: connect
-        run: pip install -r requirements.txt
+        run: uv pip install --system -r requirements.txt
 
       - name: Deploy MCP server to Connect
         working-directory: connect
@@ -68,7 +62,7 @@ jobs:
           rsconnect deploy fastapi \
             --server "$CONNECT_SERVER" \
             --api-key "$CONNECT_API_KEY" \
-            --entrypoint server:mcp \
+            --entrypoint server:app \
             --title "agentic-adoption-scan-mcp-ci-test" \
             --new \
             .
@@ -80,7 +74,7 @@ jobs:
           CONNECT_SERVER: ${{ steps.connect.outputs.url }}
           CONNECT_API_KEY: ${{ steps.connect.outputs.api-key }}
         run: |
-          pip install -e .
+          uv pip install --system -e .
           pytest test_connect_deploy.py -v -m connect \
             --tb=short \
             --junit-xml=/tmp/connect-test-results.xml
