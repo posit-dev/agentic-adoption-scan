@@ -104,7 +104,10 @@ class TestGetRepoSummary:
         with tempfile.TemporaryDirectory() as tmp:
             with patch("agentic_adoption_scan.server.CACHE_DIR", tmp):
                 with pytest.raises(RuntimeError, match="no cached"):
-                    asyncio.run(get_repo_summary(org="nonexistent-org", repo="nonexistent-repo"))
+                    coro = get_repo_summary(
+                        org="nonexistent-org", repo="nonexistent-repo"
+                    )
+                    asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------

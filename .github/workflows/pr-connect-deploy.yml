@@ -13,6 +13,9 @@ name: Connect Deployment Test
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   connect-deploy-test:
     name: Deploy and test on Posit Connect

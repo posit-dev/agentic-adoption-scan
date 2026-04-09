@@ -3,6 +3,9 @@ name: MCP Evals
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   # ─── Layer 2: Inspect AI deterministic + semantic evals ──────────────────
   inspect-evals:
