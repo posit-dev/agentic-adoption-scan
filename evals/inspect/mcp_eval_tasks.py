@@ -118,12 +118,11 @@ def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
     with tempfile.TemporaryDirectory() as cache_dir:
         result = subprocess.run(
-            [binary, "serve"],
+            [binary, "serve", "--cache-dir", cache_dir],
             input=stdin_data,
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "MCP_CACHE_DIR": cache_dir},
         )
 
     # Parse newline-delimited JSON-RPC responses, pick the one with id=2
@@ -315,6 +314,13 @@ def list_indicators_quality() -> Task:
     Requires ANTHROPIC_API_KEY. Run with:
         inspect eval mcp_eval_tasks.py --task list_indicators_quality -M anthropic/claude-sonnet-4-6
     """
+    if "ANTHROPIC_API_KEY" not in os.environ:
+        # Return a trivial no-op task so this eval can run safely without secrets.
+        return Task(
+            dataset=MemoryDataset([]),
+            solver=[],
+            scorer=accuracy(),
+        )
     return Task(
         dataset=MemoryDataset(
             [
@@ -371,15 +377,15 @@ def adoption_agent_eval() -> Task:
 
     The answer is scored by a judge model.
 
-    Skip gracefully if GITHUB_TOKEN is unavailable.
+    Skip gracefully if GITHUB_TOKEN or ANTHROPIC_API_KEY is unavailable.
     """
-    if not _has_github_token():
+    if not _has_github_token() or "ANTHROPIC_API_KEY" not in os.environ:
         # Return a trivially-passing placeholder task so CI doesn't fail
         return Task(
             dataset=MemoryDataset(
                 [
                     Sample(
-                        input="SKIP: GITHUB_TOKEN not set",
+                        input="SKIP: GITHUB_TOKEN or ANTHROPIC_API_KEY not set",
                         target="SKIPPED",
                     )
                 ]
@@ -387,7 +393,6 @@ def adoption_agent_eval() -> Task:
             solver=_skip_solver(),
             scorer=_skip_scorer(),
         )
-
     # Use posit-dev/py-shiny as a well-known small org with known indicators
     target_org = "posit-dev"
     target_repo = "py-shiny"
@@ -433,6 +438,6 @@ def _skip_solver() -> Solver:
 @scorer(metrics=[accuracy()])
 def _skip_scorer():
     async def score(state: TaskState, target: Target) -> Score:
-        return Score(value=1, explanation="Skipped — GITHUB_TOKEN not set")
+        return Score(value=1, explanation="Skipped — required secrets not available")
 
     return score

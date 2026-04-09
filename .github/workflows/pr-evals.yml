@@ -50,7 +50,7 @@ jobs:
 
       # ── Semantic quality evals (needs ANTHROPIC_API_KEY) ──────────────────
       - name: Run list_indicators_quality eval
-        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         working-directory: evals/inspect
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -62,7 +62,7 @@ jobs:
 
       # ── Integration evals (needs GITHUB_TOKEN) ────────────────────────────
       - name: Run adoption_agent_eval
-        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         working-directory: evals/inspect
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

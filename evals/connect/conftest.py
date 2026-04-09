@@ -122,10 +122,14 @@ def mcp_url(deployed_content_url: str) -> str:
 @pytest.fixture(scope="session")
 def http_client(connect_api_key: str) -> httpx.Client:
     """An httpx client authenticated to Connect."""
-    return httpx.Client(
+    client = httpx.Client(
         headers={"Authorization": f"Key {connect_api_key}"},
         timeout=60,
     )
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def wait_for_deployment(url: str, timeout: int = 120) -> None:

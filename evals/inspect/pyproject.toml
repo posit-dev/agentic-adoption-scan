@@ -1,3 +1,7 @@
+[build-system]
+requires = ["uv_build>=0.6.0,<0.11.0"]
+build-backend = "uv_build"
+
 [project]
 name = "mcp-evals"
 version = "0.1.0"
