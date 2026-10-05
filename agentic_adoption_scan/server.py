@@ -35,6 +35,7 @@ from agentic_adoption_scan.cache import Cache
 from agentic_adoption_scan.config import load_config, resolve_indicators
 from agentic_adoption_scan.github import GitHubClient, RateLimitTracker
 from agentic_adoption_scan.inspector import Inspector, summarize_content
+from agentic_adoption_scan.orgs import parse_org_list
 from agentic_adoption_scan.scanner import Scanner
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,7 @@ def _load_cache_safe(cache_dir: str) -> Cache:
 
 
 def _count_unique_repos(results) -> int:
-    return len({r.repo for r in results})
+    return len({(r.org, r.repo) for r in results})
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +171,8 @@ async def scan_org(
 ) -> str:
     """Scan a GitHub organization for agentic coding adoption indicators.
 
+    ``org`` may be a comma-separated list of organizations.
+
     Returns structured results showing which repos have CLAUDE.md, MCP configs,
     AI workflows, evals, and other agentic coding signals.
     """
@@ -178,21 +181,34 @@ async def scan_org(
         client = _make_github_client(ctx)
         cache = _load_cache_safe(CACHE_DIR)
         indicators = _resolve_indicators_from_config(CONFIG_PATH)
-        cutoff = datetime.now(tz=timezone.utc)
         from datetime import timedelta
 
-        cutoff = cutoff - timedelta(days=days)
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        orgs = parse_org_list(org)
+        if not orgs:
+            raise ValueError("org is required")
 
-        scanner = Scanner(
-            client=client,
-            cache=cache,
-            org=org,
-            indicators=indicators,
-            active_since=cutoff,
-            include_archived=include_archived,
-            force=force,
-        )
-        results = scanner.scan()
+        results = []
+        errors: dict[str, str] = {}
+        for one_org in orgs:
+            try:
+                results.extend(
+                    Scanner(
+                        client=client,
+                        cache=cache,
+                        org=one_org,
+                        indicators=indicators,
+                        active_since=cutoff,
+                        include_archived=include_archived,
+                        force=force,
+                    ).scan()
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Scan failed for %s: %s", one_org, exc)
+                errors[one_org] = str(exc)
+
+        if errors and len(errors) == len(orgs):
+            raise RuntimeError(f"scan failed for every org: {errors}")
 
         try:
             cache.save()
@@ -203,7 +219,9 @@ async def scan_org(
             results = [r for r in results if r.found]
 
         response = {
-            "org": org,
+            "org": ",".join(orgs),
+            "orgs": orgs,
+            "errors": errors,
             "total_repos": _count_unique_repos(results),
             "total_found": len(results),
             "scan_time": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -380,9 +398,52 @@ async def get_repo_summary(org: str, repo: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def summarize_adoption(data: dict, orgs: list[str]) -> dict:
+    """Aggregate cached scan data across *orgs*. Repos are keyed by (org, repo)."""
+    category_repos: dict[str, set[tuple[str, str]]] = {}
+    repo_indicators: dict[tuple[str, str], int] = {}
+    total_repos = 0
+
+    for key, cached_repo in data.items():
+        org, _, repo_name = key.partition("/")
+        if org not in orgs:
+            continue
+        total_repos += 1
+        for ind in cached_repo.indicators:
+            if not ind.found:
+                continue
+            ident = (org, repo_name)
+            repo_indicators[ident] = repo_indicators.get(ident, 0) + 1
+            category_repos.setdefault(ind.category, set()).add(ident)
+
+    by_category = sorted(
+        [
+            {"category": cat, "repo_count": len(repos)}
+            for cat, repos in category_repos.items()
+        ],
+        key=lambda x: x["category"],
+    )
+    top_repos = sorted(
+        [
+            {"org": org, "repo": repo, "indicator_count": count}
+            for (org, repo), count in repo_indicators.items()
+        ],
+        key=lambda x: -x["indicator_count"],
+    )[:20]
+
+    return {
+        "org": ",".join(orgs),
+        "orgs": orgs,
+        "total_repos": total_repos,
+        "repos_with_any_indicator": len(repo_indicators),
+        "by_category": by_category,
+        "top_repos": top_repos,
+    }
+
+
 @mcp.tool()
 async def get_adoption_summary(org: str) -> str:
-    """Get an aggregate summary of agentic coding adoption across an entire org from the most recent scan.
+    """Get an aggregate summary of agentic coding adoption across one or more orgs (comma-separated) from the most recent scan.
 
     Shows adoption counts by category and top repos.
     """
@@ -393,47 +454,9 @@ async def get_adoption_summary(org: str) -> str:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"no cached data available: {exc}") from exc
 
-        # Access internal data to aggregate across the org
-        category_repos: dict[str, set[str]] = {}
-        repo_indicators: dict[str, int] = {}
-        total_repos = 0
-
-        prefix = org + "/"
-        for key, cached_repo in cache._data.items():
-            if not key.startswith(prefix):
-                continue
-            repo_name = key[len(prefix):]
-            total_repos += 1
-
-            for ind in cached_repo.indicators:
-                if not ind.found:
-                    continue
-                repo_indicators[repo_name] = repo_indicators.get(repo_name, 0) + 1
-                category_repos.setdefault(ind.category, set()).add(repo_name)
-
-        by_category = sorted(
-            [
-                {"category": cat, "repo_count": len(repos)}
-                for cat, repos in category_repos.items()
-            ],
-            key=lambda x: x["category"],
-        )
-
-        top_repos = sorted(
-            [
-                {"repo": repo, "indicator_count": count}
-                for repo, count in repo_indicators.items()
-            ],
-            key=lambda x: -x["indicator_count"],
-        )[:20]
-
-        summary = {
-            "org": org,
-            "total_repos": total_repos,
-            "repos_with_any_indicator": len(repo_indicators),
-            "by_category": by_category,
-            "top_repos": top_repos,
-        }
-        return json.dumps(summary, indent=2)
+        orgs = parse_org_list(org)
+        if not orgs:
+            raise ValueError("org is required")
+        return json.dumps(summarize_adoption(cache._data, orgs), indent=2)
 
     return await asyncio.to_thread(_run)
