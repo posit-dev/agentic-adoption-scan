@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import yaml
 
 from .indicators import Indicator, SearchType, default_indicators, search_type_name
+from .signals import ActivityMatchers, compile_trailer, default_matchers, make_bot
 
 
 @dataclass
@@ -15,6 +16,20 @@ class IndicatorConfig:
     search_type: str = ""
     target: str = ""
     description: str = ""
+
+
+@dataclass
+class TrailerConfig:
+    """YAML representation of a commit-trailer pattern."""
+    tool: str = ""
+    pattern: str = ""
+
+
+@dataclass
+class BotConfig:
+    """YAML representation of a bot login."""
+    tool: str = ""
+    login: str = ""
 
 
 @dataclass
@@ -29,6 +44,8 @@ class Config:
     mode: str = "extend"
     disable: list[str] = field(default_factory=list)
     indicators: list[IndicatorConfig] = field(default_factory=list)
+    activity_trailers: list[TrailerConfig] = field(default_factory=list)
+    activity_bots: list[BotConfig] = field(default_factory=list)
 
 
 def load_config(path: str) -> Config:
@@ -56,7 +73,17 @@ def load_config(path: str) -> Config:
             description=item.get("description", ""),
         ))
 
-    return Config(mode=mode, disable=disable, indicators=indicators)
+    activity = data.get("activity") or {}
+    trailers = [
+        TrailerConfig(tool=t.get("tool", ""), pattern=t.get("pattern", ""))
+        for t in activity.get("trailers") or []
+    ]
+    bots = [
+        BotConfig(tool=b.get("tool", ""), login=b.get("login", ""))
+        for b in activity.get("bots") or []
+    ]
+
+    return Config(mode=mode, disable=disable, indicators=indicators, activity_trailers=trailers, activity_bots=bots)
 
 
 def parse_search_type(s: str) -> SearchType:
@@ -171,3 +198,19 @@ def generate_default_config() -> str:
 
 """
     return header + yaml.dump(cfg_dict, default_flow_style=False, allow_unicode=True)
+
+
+def resolve_activity_matchers(config: Config | None = None) -> ActivityMatchers:
+    """Return default matchers plus any ``activity:`` entries from *config*."""
+    matchers = default_matchers()
+    if config is None:
+        return matchers
+    for t in config.activity_trailers:
+        if not t.tool or not t.pattern:
+            raise ValueError("activity trailer entries need both tool and pattern")
+        matchers.trailers.append(compile_trailer(t.tool, t.pattern))
+    for b in config.activity_bots:
+        if not b.tool or not b.login:
+            raise ValueError("activity bot entries need both tool and login")
+        matchers.bots.append(make_bot(b.tool, b.login))
+    return matchers
