@@ -118,7 +118,8 @@ agentic-adoption-scan serve
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--org` | (required) | GitHub organization to scan |
+| `--org` | (one of `--org`/`--orgs-file` required) | GitHub organization to scan; repeatable or comma-separated |
+| `--orgs-file` | | File with one GitHub org per line (`#` comments allowed) |
 | `--output` | stdout | Output file path |
 | `--format` | csv | Output format: `csv` or `parquet` |
 | `--days` | 90 | Only include repos active in the last N days |
