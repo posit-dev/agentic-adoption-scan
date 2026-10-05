@@ -155,3 +155,60 @@ def test_fetch_pull_activity_repo_with_no_pull_requests():
         return _ok({"repository": {"pullRequests": None}})
 
     assert _client(handler).fetch_pull_activity("orga", "r1", "2026-09-28T00:00:00Z") == ([], [])
+
+
+def test_fetch_commits_stops_when_cursor_is_null():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _ok(_commit_page([{"committedDate": "2026-09-29T10:00:00Z", "message": "a"}], True, None))
+
+    commits = _client(handler).fetch_commits("orga", "r1", "2026-09-28T00:00:00Z")
+    assert len(calls) == 1
+    assert [c.message for c in commits] == ["a"]
+
+
+def test_fetch_pull_activity_stops_when_cursor_is_null():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _ok(
+            _pulls_page(
+                [_pr("2026-09-29T09:00:00Z", "2026-09-30T09:00:00Z", "alice")],
+                has_next=True,
+                cursor=None,
+            )
+        )
+
+    pulls, _ = _client(handler).fetch_pull_activity("orga", "r1", "2026-09-28T00:00:00Z")
+    assert len(calls) == 1
+    assert [p.author_login for p in pulls] == ["alice"]
+
+
+def test_api_retries_transient_502(monkeypatch):
+    monkeypatch.setattr("agentic_adoption_scan.github.time.sleep", lambda s: None)
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(502, text="bad gateway", headers=HEADERS)
+        return _ok({"ok": True})
+
+    assert _client(handler).graphql("query { x }", {}) == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_api_gives_up_after_repeated_502(monkeypatch):
+    monkeypatch.setattr("agentic_adoption_scan.github.time.sleep", lambda s: None)
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(502, text="bad gateway", headers=HEADERS)
+
+    with pytest.raises(RuntimeError, match="exhausted retries"):
+        _client(handler).graphql("query { x }", {})
+    assert len(calls) == 4

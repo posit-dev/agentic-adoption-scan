@@ -288,9 +288,9 @@ class GitHubClient:
             body = resp.content
             self._update_rate_limit(resp)
 
-            if resp.status_code in (403, 429):
+            if resp.status_code in (403, 429, 502, 503, 504):
                 last_exc = RuntimeError(
-                    f"rate limited (HTTP {resp.status_code}): {body.decode(errors='replace')}"
+                    f"retryable error (HTTP {resp.status_code}): {body.decode(errors='replace')}"
                 )
                 continue
 
@@ -465,7 +465,7 @@ class GitHubClient:
                     )
                 )
             page = history["pageInfo"]
-            if not page["hasNextPage"]:
+            if not page["hasNextPage"] or not page["endCursor"]:
                 break
             cursor = page["endCursor"]
         return commits
@@ -510,7 +510,7 @@ class GitHubClient:
                             )
                         )
             page = conn["pageInfo"]
-            if reached_window_start or not page["hasNextPage"]:
+            if reached_window_start or not page["hasNextPage"] or not page["endCursor"]:
                 break
             cursor = page["endCursor"]
         return pulls, reviews
