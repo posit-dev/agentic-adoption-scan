@@ -31,13 +31,32 @@ def main() -> None:
     """Scan GitHub organizations for agentic coding tool adoption."""
 
 
+def _run_per_org(orgs: list[str], run_one) -> tuple[list, dict[str, str]]:
+    """Call ``run_one(org)`` for each org, collecting results and per-org errors.
+
+    One failing org (404, SSO not authorized) does not stop the others.
+    """
+    results: list = []
+    failed: dict[str, str] = {}
+    for org in orgs:
+        try:
+            results.extend(run_one(org))
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"Error scanning {org}: {exc}", err=True)
+            failed[org] = str(exc)
+    return results, failed
+
+
 # ---------------------------------------------------------------------------
 # scan
 # ---------------------------------------------------------------------------
 
 
 @main.command()
-@click.option("--org", required=True, help="GitHub organization to scan")
+@click.option("--org", "orgs", multiple=True,
+              help="GitHub organization to scan (repeatable or comma-separated)")
+@click.option("--orgs-file", default="",
+              help="File with one GitHub org per line")
 @click.option("--days", default=90, type=int, show_default=True,
               help="Only include repos with activity in last N days")
 @click.option("--output", default="", help="Output file path (default: stdout)")
@@ -57,7 +76,8 @@ def main() -> None:
 @click.option("--verbose", is_flag=True, default=False,
               help="Enable verbose logging")
 def scan(
-    org: str,
+    orgs: tuple[str, ...],
+    orgs_file: str,
     days: int,
     output: str,
     output_format: str,
@@ -78,6 +98,13 @@ def scan(
     from agentic_adoption_scan.parquet_io import write_scan_parquet
     from agentic_adoption_scan.scanner import Scanner
     from agentic_adoption_scan.storage import LocalStore, parse_store_path  # noqa: F401
+    from agentic_adoption_scan.orgs import resolve_orgs
+
+    try:
+        org_list = resolve_orgs(orgs, orgs_file)
+    except (ValueError, OSError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
 
     client = GitHubClient.from_env()
 
@@ -112,26 +139,25 @@ def scan(
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
 
-    scanner = Scanner(
-        client=client,
-        cache=cache,
-        org=org,
-        indicators=indicators,
-        active_since=cutoff,
-        include_archived=include_archived,
-        force=force,
-    )
+    def _scan_one(org: str):
+        return Scanner(
+            client=client,
+            cache=cache,
+            org=org,
+            indicators=indicators,
+            active_since=cutoff,
+            include_archived=include_archived,
+            force=force,
+        ).scan()
 
-    try:
-        results = scanner.scan()
-    except Exception as exc:  # noqa: BLE001
-        click.echo(f"Error: {exc}", err=True)
+    results, failed = _run_per_org(org_list, _scan_one)
+    if failed and len(failed) == len(org_list):
         sys.exit(1)
 
     if found_only:
         results = [r for r in results if r.found]
 
-    unique_repos = len({r.repo for r in results})
+    unique_repos = len({(r.org, r.repo) for r in results})
 
     # Write output
     use_parquet = output_format == "parquet" or (output and output.endswith(".parquet"))
@@ -175,6 +201,10 @@ def scan(
     click.echo(
         f"Scan complete: {len(results)} results across {unique_repos} repos", err=True
     )
+
+    if failed:
+        click.echo(f"Failed orgs: {', '.join(failed)}", err=True)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

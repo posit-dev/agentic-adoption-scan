@@ -96,6 +96,14 @@ The token needs `repo` scope (or fine-grained equivalent) to read repository con
 agentic-adoption-scan scan --org your-org --output results.csv
 ```
 
+**Scan several organizations in one run:**
+
+```bash
+agentic-adoption-scan scan --org posit-dev --org rstudio --output results.csv
+```
+
+If one org fails (for example SSO is not authorized), the others are still written and the exit code is non-zero.
+
 **Fetch and analyze content of detected indicators:**
 
 ```bash
@@ -118,7 +126,8 @@ agentic-adoption-scan serve
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--org` | (required) | GitHub organization to scan |
+| `--org` | (one of `--org`/`--orgs-file` required) | GitHub organization to scan; repeatable or comma-separated |
+| `--orgs-file` | | File with one GitHub org per line (`#` comments allowed) |
 | `--output` | stdout | Output file path |
 | `--format` | csv | Output format: `csv` or `parquet` |
 | `--days` | 90 | Only include repos active in the last N days |
@@ -169,7 +178,7 @@ The tool can run as an MCP server, exposing tools for use directly within Claude
 }
 ```
 
-Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_summary`, `get_adoption_summary`.
+Available MCP tools: `scan_org`, `inspect_repo`, `list_indicators`, `get_repo_summary`, `get_adoption_summary`. `scan_org` and `get_adoption_summary` accept comma-separated orgs.
 
 #### Per-user authentication (HTTP transport)
 
