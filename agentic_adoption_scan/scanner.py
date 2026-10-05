@@ -17,6 +17,28 @@ from agentic_adoption_scan.models import ScanResult
 logger = logging.getLogger(__name__)
 
 
+def filter_repos(
+    repos: list[Repo], active_since: datetime, include_archived: bool = False
+) -> list[Repo]:
+    """Drop archived repos (unless include_archived) and inactive repos."""
+    filtered: list[Repo] = []
+    for repo in repos:
+        if repo.archived and not include_archived:
+            continue
+        if repo.pushed_at:
+            try:
+                pushed = datetime.fromisoformat(repo.pushed_at.replace("Z", "+00:00"))
+                since = active_since
+                if since.tzinfo is None:
+                    since = since.replace(tzinfo=timezone.utc)
+                if pushed < since:
+                    continue
+            except ValueError:
+                pass  # can't parse; include the repo
+        filtered.append(repo)
+    return filtered
+
+
 class Scanner:
     """Orchestrates the full org scan.
 
@@ -131,25 +153,7 @@ class Scanner:
 
     def _filter_repos(self, repos: list[Repo]) -> list[Repo]:
         """Drop archived repos (unless include_archived) and inactive repos."""
-        filtered: list[Repo] = []
-        for repo in repos:
-            if repo.archived and not self.include_archived:
-                continue
-            if repo.pushed_at:
-                try:
-                    pushed = datetime.fromisoformat(
-                        repo.pushed_at.replace("Z", "+00:00")
-                    )
-                    # Make active_since offset-aware if it isn't already
-                    since = self.active_since
-                    if since.tzinfo is None:
-                        since = since.replace(tzinfo=timezone.utc)
-                    if pushed < since:
-                        continue
-                except ValueError:
-                    pass  # can't parse; include the repo
-            filtered.append(repo)
-        return filtered
+        return filter_repos(repos, self.active_since, self.include_archived)
 
     # ------------------------------------------------------------------
     # Per-repo scanning
