@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 DEFAULT_TRAILER_PATTERNS: list[tuple[str, str]] = [
     ("claude-code", r"^\s*co-authored-by:\s*claude\b"),
     ("claude-code", r"generated with \[?claude code"),
+    ("claude-code", r"^\s*https?://claude\.ai/code/session_"),
     ("copilot", r"^\s*co-authored-by:\s*copilot\b"),
     ("cursor", r"^\s*co-authored-by:\s*cursor\b"),
 ]

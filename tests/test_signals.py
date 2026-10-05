@@ -26,6 +26,11 @@ CURSOR_TRAILER = "Co-authored-by: Cursor Agent <cursoragent@cursor.com>"
         ("Co-authored-by: Claudette Dupont <c@example.com>", set()),
         ("Co-authored-by: Cursory Person <c@example.com>", set()),
         ("", set()),
+        ("Add parquet cache\n\nhttps://claude.ai/code/session_01PRsPnpDvBh1VVrioRjq74P", {"claude-code"}),
+        (f"fix something\n\n{CLAUDE_TRAILER}\nhttps://claude.ai/code/session_01PRsPnpDvBh1VVrioRjq74P", {"claude-code"}),
+        ("see https://claude.ai/ for details", set()),
+        ("link to https://claude.ai/code/ docs page", set()),
+        ("notes: https://claude.ai/code/session_abc was shared", set()),
     ],
 )
 def test_match_trailer_tools(message, expected):
