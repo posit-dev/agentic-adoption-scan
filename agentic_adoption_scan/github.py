@@ -17,6 +17,8 @@ from typing import Optional
 
 import httpx
 
+from agentic_adoption_scan.models import CommitInfo, PullInfo, ReviewInfo
+
 logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
@@ -29,7 +31,41 @@ _SEARCH_MIN_DELAY = 2.1  # seconds — stay under 30 req/min for code search
 _RATE_LIMIT_THRESHOLD: dict[str, int] = {
     "core": 10,
     "code_search": 1,
+    "graphql": 50,  # graphql has 5000 points/hr; keep a buffer for in-flight queries
 }
+
+_COMMITS_QUERY = """
+query($owner: String!, $name: String!, $since: GitTimestamp!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target {
+        ... on Commit {
+          history(first: 100, since: $since, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            nodes { committedDate message }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_PULLS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 50, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        createdAt
+        updatedAt
+        author { login }
+        reviews(first: 30) { nodes { submittedAt author { login } } }
+      }
+    }
+  }
+}
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -207,12 +243,15 @@ class GitHubClient:
         endpoint: str,
         accept: str = "",
         resource: str = "core",
+        json_body: Optional[dict] = None,
     ) -> tuple[bytes, httpx.Response]:
         """Call the GitHub REST API and return (body, response).
 
         *resource* identifies the rate limit bucket (``"core"``,
         ``"code_search"``, etc.) so we only wait when that specific
         bucket is low.
+
+        *json_body*, when given, is sent as the JSON request body (used for GraphQL).
 
         Raises on unrecoverable errors or after exhausting all retries.
         """
@@ -241,7 +280,7 @@ class GitHubClient:
                 headers["Authorization"] = "Bearer " + self._token
 
             try:
-                resp = self._client.request(method, raw_url, headers=headers)
+                resp = self._client.request(method, raw_url, headers=headers, json=json_body)
             except httpx.RequestError as exc:
                 last_exc = exc
                 continue
@@ -386,6 +425,95 @@ class GitHubClient:
         endpoint = f"/repos/{owner}/{repo}/contents/{path}"
         body, _ = self.api("GET", endpoint, accept="application/vnd.github.raw+json")
         return body
+
+    def graphql(self, query: str, variables: dict) -> dict:
+        """Run a GraphQL query and return its ``data`` object.
+
+        Raises RuntimeError if the response carries GraphQL errors.
+        """
+        import json as _json
+
+        body, _ = self.api(
+            "POST",
+            "/graphql",
+            resource="graphql",
+            json_body={"query": query, "variables": variables},
+        )
+        payload = _json.loads(body)
+        if payload.get("errors"):
+            raise RuntimeError(f"github graphql error: {payload['errors']}")
+        return payload.get("data") or {}
+
+    def fetch_commits(self, owner: str, repo: str, since: str) -> list[CommitInfo]:
+        """Return default-branch commits made at or after *since*."""
+        commits: list[CommitInfo] = []
+        cursor = None
+        while True:
+            data = self.graphql(
+                _COMMITS_QUERY,
+                {"owner": owner, "name": repo, "since": since, "cursor": cursor},
+            )
+            ref = (data.get("repository") or {}).get("defaultBranchRef") or {}
+            history = (ref.get("target") or {}).get("history")
+            if not history:
+                break
+            for node in history["nodes"]:
+                commits.append(
+                    CommitInfo(
+                        committed_date=node["committedDate"],
+                        message=node.get("message") or "",
+                    )
+                )
+            page = history["pageInfo"]
+            if not page["hasNextPage"]:
+                break
+            cursor = page["endCursor"]
+        return commits
+
+    def fetch_pull_activity(
+        self, owner: str, repo: str, since: str
+    ) -> tuple[list[PullInfo], list[ReviewInfo]]:
+        """Return PRs created and reviews submitted at or after *since*.
+
+        PRs are read newest-updated first and reading stops at the first PR
+        last updated before *since*. Reviews per PR are capped at 30.
+        """
+        pulls: list[PullInfo] = []
+        reviews: list[ReviewInfo] = []
+        cursor = None
+        while True:
+            data = self.graphql(
+                _PULLS_QUERY, {"owner": owner, "name": repo, "cursor": cursor}
+            )
+            conn = (data.get("repository") or {}).get("pullRequests")
+            if not conn:
+                break
+            reached_window_start = False
+            for node in conn["nodes"]:
+                if node["updatedAt"] < since:
+                    reached_window_start = True
+                    break
+                if node["createdAt"] >= since:
+                    pulls.append(
+                        PullInfo(
+                            created_at=node["createdAt"],
+                            author_login=(node.get("author") or {}).get("login", ""),
+                        )
+                    )
+                for rv in (node.get("reviews") or {}).get("nodes", []):
+                    submitted = rv.get("submittedAt")
+                    if submitted and submitted >= since:
+                        reviews.append(
+                            ReviewInfo(
+                                submitted_at=submitted,
+                                author_login=(rv.get("author") or {}).get("login", ""),
+                            )
+                        )
+            page = conn["pageInfo"]
+            if reached_window_start or not page["hasNextPage"]:
+                break
+            cursor = page["endCursor"]
+        return pulls, reviews
 
     # ------------------------------------------------------------------
     # Internal helpers
