@@ -288,7 +288,9 @@ def activity(
         _store, _base = parse_store_path(cache_dir)
         cache = ActivityCache(cache_dir, _store, _base, {}, {})
 
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    run_now = datetime.now(tz=timezone.utc)
+    run_ts = run_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = run_now - timedelta(days=days)
     failed_repos: list[str] = []
 
     def _collect_one(org: str):
@@ -300,6 +302,7 @@ def activity(
             active_since=cutoff,
             include_archived=include_archived,
             force=force,
+            now=run_now,
         )
         rows = collector.collect()
         failed_repos.extend(f"{org}/{name}" for name in collector.failed_repos)
@@ -320,7 +323,9 @@ def activity(
             _out = output or "activity-results.parquet"
             _dir = _os.path.dirname(_os.path.abspath(_out))
             _base = _os.path.splitext(_os.path.basename(_out))[0]
-            write_activity_parquet(LocalStore(), posixpath.join(_dir, _base), results)
+            # Append-only: only rows recomputed this run; cached older rows keep their old partitions.
+            fresh = [r for r in results if r.scan_timestamp == run_ts]
+            write_activity_parquet(LocalStore(), posixpath.join(_dir, _base), fresh)
         except Exception as exc:  # noqa: BLE001
             click.echo(f"Error writing Parquet: {exc}", err=True)
             sys.exit(1)

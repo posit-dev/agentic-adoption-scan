@@ -224,6 +224,16 @@ def _scan_partition_key(org: str, scan_timestamp: str) -> tuple[str, str]:
     return org, date_str
 
 
+def _activity_partition_key(org: str, scan_timestamp: str) -> tuple[str, str, str]:
+    """Return (org, date, HHMMSS) so each run writes its own file within a date partition."""
+    from datetime import datetime
+    try:
+        t = datetime.fromisoformat(scan_timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return org, t.strftime("%Y-%m-%d"), t.strftime("%H%M%S")
+    except (ValueError, AttributeError):
+        return org, "unknown", "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Public API: partitioned write
 # ---------------------------------------------------------------------------
@@ -340,15 +350,15 @@ def read_activity_rows(store: ObjectStore, path: str) -> list[ActivityResult]:
 
 
 def write_activity_parquet(store: ObjectStore, base_path: str, results: list[ActivityResult]) -> None:
-    """Write activity results as Hive-partitioned Parquet files (org, scan date)."""
+    """Write activity results as Hive-partitioned Parquet files (org, scan date), one file per run."""
     import posixpath
 
-    groups: dict[tuple[str, str], list[ActivityResult]] = {}
+    groups: dict[tuple[str, str, str], list[ActivityResult]] = {}
     for r in results:
-        groups.setdefault(_scan_partition_key(r.org, r.scan_timestamp), []).append(r)
+        groups.setdefault(_activity_partition_key(r.org, r.scan_timestamp), []).append(r)
 
-    for (org, date), rows in groups.items():
-        part_path = posixpath.join(base_path, f"org={org}", f"date={date}", "part-0.parquet")
+    for (org, date, clock), rows in groups.items():
+        part_path = posixpath.join(base_path, f"org={org}", f"date={date}", f"part-{clock}.parquet")
         store.write(part_path, _serialize_table(_rows_to_table(rows, ACTIVITY_SCHEMA)))
 
 

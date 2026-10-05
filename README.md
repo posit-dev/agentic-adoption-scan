@@ -174,6 +174,7 @@ scan_timestamp,org,repo,repo_visibility,week_start,tool,signal,count,total_commi
 Warnings:
 
 - `total_commits` repeats on every row of an org × repo × week. Take one value per `(org, repo, week_start)` (for example `max(total_commits)` in DuckDB) before summing, or you will multiply the denominator.
+- `total_commits` includes merge commits (the GraphQL history matches `git log`, which lists merges).
 - Counts are a floor. Many people strip trailers from their commits, so read the numbers next to the `scan` footprint rather than as a measure of total AI use.
 - Repos not pushed within `--days` are not collected, so review-only or PR-only bot activity in a repo with no push inside the window is not counted (an undercount).
 - The default trailer patterns and bot logins are best-known values and may need extending through the `activity:` config section.
@@ -192,7 +193,7 @@ activity:
 
 The first fetch for a repo backfills `--days` (default 90). Later runs are incremental and only re-fetch from the last collected week. Use `--force` to ignore the cache and widen the window.
 
-Parquet output (`--format parquet`) is partitioned by org and scan date. A re-run writes a new partition without deleting the old one, so a replaced week can exist twice. Readers must keep only the latest scan per org × repo × week. This DuckDB example does that, then computes the share of commits carrying each tool's trailer:
+Parquet output is append-only, unlike CSV (a full snapshot of the window). Each run writes only the rows it recomputed, into a per-run file `org=<org>/date=<YYYY-MM-DD>/part-<HHMMSS>.parquet`, and never deletes or rewrites earlier runs' files. A week the run re-fetched can therefore exist in several files, so readers must keep only the latest scan per org × repo × week. `--output foo.parquet` writes the directory `foo/` (default `activity-results/`), and `--format parquet --output x.csv` uses the stem `x/`. This DuckDB example does that, then computes the share of commits carrying each tool's trailer:
 
 ```sql
 CREATE VIEW activity AS
