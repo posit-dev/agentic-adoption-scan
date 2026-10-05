@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from agentic_adoption_scan.models import InspectResult, ScanResult
+from agentic_adoption_scan.models import ActivityResult, InspectResult, ScanResult
 from agentic_adoption_scan.storage import ObjectStore
 
 if TYPE_CHECKING:
@@ -224,6 +224,16 @@ def _scan_partition_key(org: str, scan_timestamp: str) -> tuple[str, str]:
     return org, date_str
 
 
+def _activity_partition_key(org: str, scan_timestamp: str) -> tuple[str, str, str]:
+    """Return (org, date, HHMMSS) so each run writes its own file within a date partition."""
+    from datetime import datetime
+    try:
+        t = datetime.fromisoformat(scan_timestamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return org, t.strftime("%Y-%m-%d"), t.strftime("%H%M%S")
+    except (ValueError, AttributeError):
+        return org, "unknown", "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Public API: partitioned write
 # ---------------------------------------------------------------------------
@@ -286,3 +296,88 @@ def read_inspect_rows(store: ObjectStore, path: str) -> list[InspectRow]:
     """Read InspectRows from a single Parquet file."""
     data = store.read(path)
     return _deserialize_inspect_rows(data)
+
+
+# ---------------------------------------------------------------------------
+# Activity table
+# ---------------------------------------------------------------------------
+
+ACTIVITY_SCHEMA = pa.schema([
+    ("scan_timestamp", pa.string()),
+    ("org", pa.string()),
+    ("repo", pa.string()),
+    ("repo_visibility", pa.string()),
+    ("week_start", pa.string()),
+    ("tool", pa.string()),
+    ("signal", pa.string()),
+    ("count", pa.int64()),
+    ("total_commits", pa.int64()),
+])
+
+ACTIVITY_STATE_SCHEMA = pa.schema([
+    ("org", pa.string()),
+    ("repo", pa.string()),
+    ("fetched_through", pa.string()),
+])
+
+
+def _deserialize_activity_rows(data: bytes) -> list[ActivityResult]:
+    d = pq.read_table(io.BytesIO(data)).to_pydict()
+    return [
+        ActivityResult(
+            scan_timestamp=d["scan_timestamp"][i] or "",
+            org=d["org"][i] or "",
+            repo=d["repo"][i] or "",
+            repo_visibility=d["repo_visibility"][i] or "",
+            week_start=d["week_start"][i] or "",
+            tool=d["tool"][i] or "",
+            signal=d["signal"][i] or "",
+            count=int(d["count"][i] or 0),
+            total_commits=int(d["total_commits"][i] or 0),
+        )
+        for i in range(len(d["scan_timestamp"]))
+    ]
+
+
+def write_activity_rows(store: ObjectStore, file_path: str, rows: list[ActivityResult]) -> None:
+    """Serialize and write a flat list of ActivityResults to one Parquet file."""
+    store.write(file_path, _serialize_table(_rows_to_table(rows, ACTIVITY_SCHEMA)))
+
+
+def read_activity_rows(store: ObjectStore, path: str) -> list[ActivityResult]:
+    """Read ActivityResults from a single Parquet file."""
+    return _deserialize_activity_rows(store.read(path))
+
+
+def write_activity_parquet(store: ObjectStore, base_path: str, results: list[ActivityResult]) -> None:
+    """Write activity results as Hive-partitioned Parquet files (org, scan date), one file per run."""
+    import posixpath
+
+    groups: dict[tuple[str, str, str], list[ActivityResult]] = {}
+    for r in results:
+        groups.setdefault(_activity_partition_key(r.org, r.scan_timestamp), []).append(r)
+
+    for (org, date, clock), rows in groups.items():
+        part_path = posixpath.join(base_path, f"org={org}", f"date={date}", f"part-{clock}.parquet")
+        store.write(part_path, _serialize_table(_rows_to_table(rows, ACTIVITY_SCHEMA)))
+
+
+def write_activity_state(
+    store: ObjectStore, file_path: str, state: dict[tuple[str, str], str]
+) -> None:
+    """Write the per-repo ``fetched_through`` map."""
+    cols = {
+        "org": [k[0] for k in state],
+        "repo": [k[1] for k in state],
+        "fetched_through": list(state.values()),
+    }
+    table = pa.table(cols, schema=ACTIVITY_STATE_SCHEMA)
+    store.write(file_path, _serialize_table(table))
+
+
+def read_activity_state(store: ObjectStore, path: str) -> dict[tuple[str, str], str]:
+    d = pq.read_table(io.BytesIO(store.read(path))).to_pydict()
+    return {
+        (d["org"][i], d["repo"][i]): d["fetched_through"][i] or ""
+        for i in range(len(d["org"]))
+    }

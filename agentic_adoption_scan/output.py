@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from typing import IO
 
-from .models import InspectResult, ScanResult
+from .models import ActivityResult, InspectResult, ScanResult
 
 
 def write_scan_csv(writer: IO[str], results: list[ScanResult]) -> None:
@@ -69,4 +69,32 @@ def write_inspect_csv(writer: IO[str], results: list[InspectResult]) -> None:
             str(r.content_size),
             r.content_summary,
             r.raw_content,
+        ])
+
+
+def write_activity_csv(writer: IO[str], results: list[ActivityResult]) -> None:
+    """Write activity results in tidy data format (9-column CSV)."""
+    w = csv.writer(writer)
+    w.writerow([
+        "scan_timestamp",
+        "org",
+        "repo",
+        "repo_visibility",
+        "week_start",
+        "tool",
+        "signal",
+        "count",
+        "total_commits",
+    ])
+    for r in results:
+        w.writerow([
+            r.scan_timestamp,
+            r.org,
+            r.repo,
+            r.repo_visibility,
+            r.week_start,
+            r.tool,
+            r.signal,
+            str(r.count),
+            str(r.total_commits),
         ])

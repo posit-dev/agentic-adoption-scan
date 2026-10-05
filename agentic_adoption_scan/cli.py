@@ -208,6 +208,158 @@ def scan(
 
 
 # ---------------------------------------------------------------------------
+# activity
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--org", "orgs", multiple=True,
+              help="GitHub organization to analyze (repeatable or comma-separated)")
+@click.option("--orgs-file", default="",
+              help="File with one GitHub org per line")
+@click.option("--days", default=90, type=int, show_default=True,
+              help="Backfill window for a repo's first fetch (use --force to widen later)")
+@click.option("--output", default="", help="Output file path (default: stdout)")
+@click.option("--format", "output_format",
+              type=click.Choice(["csv", "parquet"]), default="csv", show_default=True,
+              help="Output format")
+@click.option("--cache-dir", default=".agentic-scan-cache", show_default=True,
+              help="Directory for scan state cache")
+@click.option("--config", "config_path", default="",
+              help="Path to config file (YAML) with optional activity: matchers")
+@click.option("--include-archived", is_flag=True, default=False,
+              help="Include archived repos")
+@click.option("--force", is_flag=True, default=False,
+              help="Ignore cached fetch times and backfill the full window")
+@click.option("--verbose", is_flag=True, default=False,
+              help="Enable verbose logging")
+def activity(
+    orgs: tuple[str, ...],
+    orgs_file: str,
+    days: int,
+    output: str,
+    output_format: str,
+    cache_dir: str,
+    config_path: str,
+    include_archived: bool,
+    force: bool,
+    verbose: bool,
+) -> None:
+    """Collect weekly AI-attribution activity (commit trailers, bot PRs and reviews).
+
+    Counts are a floor: many people strip trailers, so compare with `scan`.
+    """
+    _setup_logging(verbose)
+
+    from agentic_adoption_scan.activity import ActivityCollector
+    from agentic_adoption_scan.activity_cache import ActivityCache
+    from agentic_adoption_scan.config import load_config, resolve_activity_matchers
+    from agentic_adoption_scan.github import GitHubClient
+    from agentic_adoption_scan.orgs import resolve_orgs
+    from agentic_adoption_scan.output import write_activity_csv
+    from agentic_adoption_scan.parquet_io import write_activity_parquet
+
+    try:
+        org_list = resolve_orgs(orgs, orgs_file)
+    except (ValueError, OSError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    cfg = None
+    if config_path:
+        try:
+            cfg = load_config(config_path)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"Error loading config: {exc}", err=True)
+            sys.exit(1)
+    try:
+        matchers = resolve_activity_matchers(cfg)
+    except ValueError as exc:
+        click.echo(f"Error resolving activity matchers: {exc}", err=True)
+        sys.exit(1)
+
+    client = GitHubClient.from_env()
+    try:
+        cache = ActivityCache.load(cache_dir)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"Warning: could not load activity cache: {exc} (starting fresh)", err=True)
+        from agentic_adoption_scan.storage import parse_store_path
+
+        _store, _base = parse_store_path(cache_dir)
+        cache = ActivityCache(cache_dir, _store, _base, {}, {})
+
+    run_now = datetime.now(tz=timezone.utc)
+    run_ts = run_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    cutoff = run_now - timedelta(days=days)
+    failed_repos: list[str] = []
+
+    def _collect_one(org: str):
+        collector = ActivityCollector(
+            client=client,
+            cache=cache,
+            org=org,
+            matchers=matchers,
+            active_since=cutoff,
+            include_archived=include_archived,
+            force=force,
+            now=run_now,
+        )
+        rows = collector.collect()
+        failed_repos.extend(f"{org}/{name}" for name in collector.failed_repos)
+        return rows
+
+    results, failed = _run_per_org(org_list, _collect_one)
+    if failed and len(failed) == len(org_list):
+        sys.exit(1)
+
+    use_parquet = output_format == "parquet" or (output and output.endswith(".parquet"))
+    if use_parquet:
+        try:
+            import os as _os
+            import posixpath
+
+            from agentic_adoption_scan.storage import LocalStore
+
+            _out = output or "activity-results.parquet"
+            _dir = _os.path.dirname(_os.path.abspath(_out))
+            _base = _os.path.splitext(_os.path.basename(_out))[0]
+            # Append-only: only rows recomputed this run; cached older rows keep their old partitions.
+            fresh = [r for r in results if r.scan_timestamp == run_ts]
+            write_activity_parquet(LocalStore(), posixpath.join(_dir, _base), fresh)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"Error writing Parquet: {exc}", err=True)
+            sys.exit(1)
+    elif output:
+        try:
+            with open(output, "w", newline="", encoding="utf-8") as f:
+                write_activity_csv(f, results)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"Error creating output file: {exc}", err=True)
+            sys.exit(1)
+    else:
+        import io
+
+        buf = io.StringIO()
+        write_activity_csv(buf, results)
+        sys.stdout.write(buf.getvalue())
+
+    try:
+        cache.save()
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"Warning: could not save activity cache: {exc}", err=True)
+
+    unique_repos = len({(r.org, r.repo) for r in results})
+    click.echo(f"Activity complete: {len(results)} rows across {unique_repos} repos", err=True)
+
+    if failed_repos:
+        click.echo(f"Repos that failed: {', '.join(failed_repos)}", err=True)
+    if failed:
+        click.echo(f"Failed orgs: {', '.join(failed)}", err=True)
+    if failed or failed_repos:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # inspect
 # ---------------------------------------------------------------------------
 
