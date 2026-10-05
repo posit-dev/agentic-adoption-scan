@@ -153,6 +153,69 @@ The tool checks for 25+ built-in indicators across 7 categories:
 
 You can extend or override these indicators via a YAML config file (`init-config` generates a starter).
 
+### Activity (AI attribution over time)
+
+`scan` shows what AI tooling a repo has set up. `activity` shows how much it is used over time, by counting weekly attribution signals in commits and pull requests:
+
+```bash
+agentic-adoption-scan activity --org my-org --org other-org --days 90 --output activity.csv
+```
+
+The table has one row per org × repo × week × tool × signal, with nine columns:
+
+```
+scan_timestamp,org,repo,repo_visibility,week_start,tool,signal,count,total_commits
+```
+
+- `week_start` is the Monday (UTC) of the week.
+- `signal` is `commit_trailer` (a commit message trailer naming the tool), `pr_author_bot` (a PR opened by the tool's bot), or `review_bot` (a PR review by the tool's bot).
+- A repo week with commits but no AI signal gets one zero row (`tool` empty, `signal` = `none`, `count` = 0) so the denominator is never missing.
+
+Warnings:
+
+- `total_commits` repeats on every row of an org × repo × week. Take one value per `(org, repo, week_start)` (for example `max(total_commits)` in DuckDB) before summing, or you will multiply the denominator.
+- Counts are a floor. Many people strip trailers from their commits, so read the numbers next to the `scan` footprint rather than as a measure of total AI use.
+- Repos not pushed within `--days` are not collected, so review-only or PR-only bot activity in a repo with no push inside the window is not counted (an undercount).
+- The default trailer patterns and bot logins are best-known values and may need extending through the `activity:` config section.
+
+The `activity:` section of the YAML config extends the defaults (it does not replace them):
+
+```yaml
+activity:
+  trailers:
+    - tool: claude-code
+      pattern: "Generated with \\[Claude Code\\]"
+  bots:
+    - tool: copilot
+      login: copilot-pull-request-reviewer
+```
+
+The first fetch for a repo backfills `--days` (default 90). Later runs are incremental and only re-fetch from the last collected week. Use `--force` to ignore the cache and widen the window.
+
+Parquet output (`--format parquet`) is partitioned by org and scan date. A re-run writes a new partition without deleting the old one, so a replaced week can exist twice. Readers must keep only the latest scan per org × repo × week. This DuckDB example does that, then computes the share of commits carrying each tool's trailer:
+
+```sql
+CREATE VIEW activity AS
+SELECT * FROM read_parquet('activity-results/**/*.parquet', hive_partitioning = false)
+QUALIFY scan_timestamp = max(scan_timestamp) OVER (PARTITION BY org, repo, week_start);
+
+WITH totals AS (
+  SELECT week_start, sum(total_commits) AS all_commits
+  FROM (SELECT org, repo, week_start, max(total_commits) AS total_commits
+        FROM activity GROUP BY ALL)
+  GROUP BY week_start
+), ai AS (
+  SELECT week_start, tool, sum(count) AS ai_commits
+  FROM activity WHERE signal = 'commit_trailer' GROUP BY ALL
+)
+SELECT t.week_start, ai.tool, ai.ai_commits, t.all_commits,
+       ai.ai_commits::DOUBLE / t.all_commits AS share
+FROM totals t JOIN ai USING (week_start)
+ORDER BY t.week_start, ai.tool;
+```
+
+A commit with two tools' trailers counts once per tool, so shares across tools can add to more than 100%.
+
 ### Output format
 
 Scan results are written as tidy CSV — one row per (repo × indicator) observation:
